@@ -1,0 +1,198 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+* Creating a CL-Rivescript Interpreter (Part 1)
+Hi, I've been thinking about writing this interpreter for a while, I even commented on it on reddit, however I got derailed because of life, that seems to happen a lot to me. If you don't know what [[https://www.rivescript.com/][Rivescript]] is, it is a simple scripting language for chat bots, it is implemented in some languages but it has not been implemented on Common-Lisp, I pretend to have a working interpreter at some point, but it is mostly for fun and to try some things, so if you think my code is horrible and inefficient it is because I am not necessarily working toward something I can distribute.
+
+** Using cl-protograph
+Part of my motivation for this is to write an application using a graph database, I will use my own ([[https://github.com/maufdez/ProtoGraph][protograph]]), it is incomplete, it is memory loaded (not persistent), and it has being tested only with a few examples, but I think I have to use it to be able to create a new better version in the future.
+The idea is that you can create to use a graphs with the triggers, responses to those triggers, and potentially also the variables, substitutions, and other rivescript features.
+
+** Triggers and Responses
+To illustrate the concept I will start in this first post with a very simple brain, the very basic things in the language are the triggers, which start with a "+" sign, and it's responses which are placed immediately below it preceded by a "-" character, I will, for now, assume that each response can contain only a single line. I will construct little by little all the features of the language, but for now I will assume all responses have an equal chance of being selected. My first script will come from the tutorial. I will at the same time create a package, with cl-ppcre (regular expressions will help with text parsing) and cl-protograph, my graph database.
+
+#+BEGIN_SRC lisp :exports code
+  (defpackage :cl-rivescript (:use :common-lisp 
+                             :cl-ppcre
+                             :proto-graph
+                             :proto-query))
+
+  (in-package :cl-rivescript)
+
+  (defparameter *brain*
+    "+ hello bot
+  - Hello, human!
+  + how are you
+  - I'm great, how are you?
+  - I'm good, you?
+  - Good :) you?
+  - Great! You?
+  - I'm fine, thanks for asking!")
+#+END_SRC 
+
+#+RESULTS:
+: COMMON-LISP-USER::*BRAIN*
+
+This very limited brain only understands two triggers, "hello bot" which always returns "Hello, human!", and "how are you" which has five possible answers, each with the same chance of being selected.
+I won't teach rivescript here because it would make no sense since there is a nice tutorial on it in their site, but for now let's say that there are triggers, which have text, and responses which also have text. It will be convenient in the future to store the triggers as list of words instead of a string, and for now we can store replies as strings, triggers and responses will be nodes in protograph and the responses will be linked to the appropriate triggers.
+
+We will define a global variable that contains the last trigger node, and use that for our add trigger function, that way it should be easy to link the responses to the triggers that generated them.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *last-created-trigger* nil
+    "A variable to contain the last trigger for easy linking")
+
+  (defun add-trigger (string)
+    "Adds nodes of type trigger to the database"
+    (let ((text (cdr (split "\\s" string))))
+      (setf *last-created-trigger* (node-create :label :trigger))
+      (setf (get-prop *last-created-trigger* :text) text))) 
+
+  (defun add-response (string)
+    "Adds a response and ties it to the latest trigger created"
+    (let ((text (aref (nth-value 1 (scan-to-strings "\\s*-\\s+(.*)" string)) 0))
+          (resp (node-create :label :response)))
+      (setf (get-prop resp :text) text)
+      (link-create :responds resp *last-created-trigger* :properties '(:weight 1))
+      text))
+#+END_SRC
+
+#+RESULTS:
+: ADD-RESPONSE
+
+I will break it down a bit since these functions rely heavily on protograph which is not used by anybody but me. Nodes and Links are objects, the nodes have labels which can be used for querying, we'll see that later, the ~node-create~ function is quite simple, you can see that add-trigger calls it, makes the label ~:trigger~, and then set a property ~:text~ to a list obtained using the ~split~ function (from cl-ppcre), the ~cdr~ is there to eliminate the "+" sign. The properties in both ~add-trigger~ and ~add-response~ are set in a separate line because if you set it in the ~node-create~ function the text does not get evaluated, I will add that to the to-do list of things to fix in protograph.
+The responses are created in a similar fashion but asides from the node it creates a link that goes from the response to the trigger, the type of link is set to ~:responds~. I am choosing the properties, labels and types on the fly, protograph is schema-less, you just assign names arbitrarily.
+
+In ~add-response~, the text is read in a convoluted way, we will fix this and other things in the future, but basically it uses a regular expression to remove any leading spaces and the "-" sign, scan to string returns multiple values, we are interested in the second, which is an array, and we are only interested in the first element of it (I hope that is enough explanation).
+
+Now we have the means to create triggers and responses, we will use the ~*brain*~ variable as a stream, that way we can later change it to a file easily, the idea is to read one line at a time and call the appropriate function based on the first non space character which should be a "+" or a "-" (in this first version). So we will first write a function to get the first non space character (rivescript allows indentation).
+
+#+BEGIN_SRC lisp :exports code
+  (defun first-nonspace-char (string)
+    "Receives a string and returns the first non space character"
+    (aref (remove #\tab (remove #\space string)) 0))
+#+END_SRC
+
+#+RESULTS:
+: FIRST-NONSPACE-CHAR
+
+And now we can write a function to read a file containing commands, in rivescript terminology a document, a brain is a directory containing several documents, in my case I called my variable ~*brain*~ because that is all there is, but in future posts we should make a function that reads a brain (processes all files in a directory). 
+
+The following functions should suffice for now.
+
+#+BEGIN_SRC lisp :exports code
+  (defun do-command (line)
+    "Call the appropriate function to process the current line"
+    (let ((command (first-nonspace-char line)))
+      (case command
+        (#\+ (add-trigger line))
+        (#\- (add-response line))
+        (otherwise nil))))
+
+  (defun read-doc (stream)
+    "This funciton reads the brain from a stream"
+    (loop for line = (read-line stream nil 'eof)
+       until (eq line 'eof)
+         do (do-command line)))
+
+#+END_SRC
+
+#+RESULTS:
+: READ-DOC
+
+For now we will just use a case to recognize the commands, in future posts I will probably move away from this method and use a macro to add commands, that will make it easier to maintain.
+
+Now we can execute ~read-doc~, using the sting in the ~*brain*~ variable.
+
+#+BEGIN_SRC lisp :exports code
+  (read-doc (make-string-input-stream *brain*))
+#+END_SRC
+
+We can inspect the node contents using the ~all-nodes~ function. It seems like the current printed representation of the node objects interacts weirdly with my slime, I will also add this to the list of things to improve, as well as a function to clear the database (very useful during debugging). These are the nodes of the database.
+
+#+BEGIN_SRC lisp :exports both
+  (all-nodes)
+#+END_SRC
+
+#+RESULTS:
+: (#<PROTO-GRAPH::NODE ID: 7 |TEXT: I'm fine, thanks for asking! >
+:  #<PROTO-GRAPH::NODE ID: 6 |TEXT: Great! You? >
+:  #<PROTO-GRAPH::NODE ID: 5 |TEXT: Good :) you? >
+:  #<PROTO-GRAPH::NODE ID: 4 |TEXT: I'm good, you? >
+:  #<PROTO-GRAPH::NODE ID: 3 |TEXT: I'm great, how are you? >
+:  #<PROTO-GRAPH::NODE ID: 2 |TEXT: (how are you) >
+:  #<PROTO-GRAPH::NODE ID: 1 |TEXT: Hello, human! >
+:  #<PROTO-GRAPH::NODE ID: 0 |TEXT: (hello bot) >)
+
+This is what we expected, but it is not very useful, we have to create a function to read a string, select a reply and show it on the screen, that comes next.
+
+First we have to create a read function, it has to get a line of text from standard input, lowercase it, strip it of anything that is not a letter, and return a list of the words in it, that is how rivescript works.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-input ()
+    "Gets a line of input from the user"
+    (mapcar #'(lambda (word) (remove-if-not #'alphanumericp word))
+            (split "\\s+" (string-downcase (read-line)))))
+#+END_SRC
+
+The function, reads the line, turn all letters to lowercase, splits by spaces (1 or more) and finally removes any non alphanumeric characters from each element in the list (there are probably more elegant ways of doing this, but doing the substitution at the end avoids removing the space characters.
+
+Now we need a function to get all the possible answers, if any, to the line entered by the user. Here we will use protograph to query all responses to triggers with the text read by ~get-input~, what we need is to get the text property of every element that matches the query.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-answers (input)
+    "Gets a list of words forming a phrase to see if it matches any trigger"
+    (let ((triggers (node-match :label :trigger :properties `(:text ,input))))
+      (if triggers
+          (mapcar #'(lambda (trigger) (get-prop trigger :text))
+                  (rec-search :to triggers :link-type :responds))
+          '("I don't understand"))))
+#+END_SRC
+
+The back-quote notation is necessary so ~node-match~ uses the value of the variable ~input~ instead of the symbol itself. The false statement contains a fall-lback response, this is not standard rivescript behavior, but we will work like that for now. We will use the "how are you" trigger to test this, so we get more than one option.
+
+#+BEGIN_SRC lisp :exports both
+  (get-answers '("how" "are" "you"))
+#+END_SRC
+
+#+RESULTS:
+| I'm fine, thanks for asking! | Great! You? | Good :) you? | I'm good, you? | I'm great, how are you? |
+
+Seems like we are getting places, but we don't need a menu of possible replies, so we have to select one randomly, rivescript has a concept of weights, but we will for now ignore it and just assign equal weight to all of them, this function should accomplish that.
+
+#+BEGIN_SRC lisp :exports code
+  (defun select-response (list)
+    "Randomly select one response from a list"
+    (when list (nth (random (length list)) list)))
+#+END_SRC
+
+The last thing to do is create a REPL with these parts, once again I will deviate a bit from rivescript behavior, I don't like infinite loops, so I will give us an out condition, by saying "bye", as we advance on these series of posts we will make things be more compliant.
+
+#+BEGIN_SRC lisp :exports code
+  (defun main (stream)
+    "Get a brain reads it and starts a loop"
+    (read-doc stream)
+    (loop for input = (get-input) until (string= "bye" (car input))
+         do (format t "~a~%" (select-response (get-answers input)))))
+#+END_SRC
+
+#+RESULTS:
+: MAIN
+
+This is a transcript of my conversation with our chat bot.
+
+#+BEGIN_EXAMPLE
+cl-rivescript> (main (make-string-input-stream *brain*)) 
+I don't understand                          
+Hello bot!                                  
+Hello, human!                               
+How are you?                                
+I'm great, how are you?                     
+bye                                         
+NIL                                         
+cl-rivescript>                                           
+
+#+END_EXAMPLE
+
+#  LocalWords:  protograph rivescript alist funcalls
