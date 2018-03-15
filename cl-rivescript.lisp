@@ -10,10 +10,20 @@
 - I'm good, you?
 - Good :) you?
 - Great! You?
-- I'm fine, thanks for asking!")
+- I'm fine, thanks for asking!
++ tell me a poem 
+- Little Miss Muffit sat on her tuffet\\n
+^ in a nonchalant sort of way.\\n
+^ With her forcefield around her,\\n
+^ the Spider, the bounder,\\n
+^ Is not in the picture today.
+")
 
 (defvar *last-created-trigger* nil
   "A variable to contain the last trigger for easy linking")
+
+(defvar *last-created-response* nil
+  "A variable to contain the last response for easy linking")
 
 (defun add-trigger (string)
   "Adds nodes of type trigger to the database"
@@ -21,13 +31,30 @@
     (setf *last-created-trigger* (node-create :label :trigger))
     (setf (get-prop *last-created-trigger* :text) text))) 
 
+(defun clean-string (string)
+  (let ((text (string-trim '(#\space #\tab) string)))
+    (format nil "~{~a~^ ~}" (cdr (split "\\s+" text)))))
+
 (defun add-response (string)
   "Adds a response and ties it to the latest trigger created"
-  (let ((text (aref (nth-value 1 (scan-to-strings "\\s*-\\s+(.*)" string)) 0))
+  (let ((text (clean-string string))
         (resp (node-create :label :response)))
     (setf (get-prop resp :text) text)
-    (link-create :responds resp *last-created-trigger* :properties '(:weight 1))
+    (link-create :responds resp *last-created-trigger*
+		 :properties '(:weight 1))
+    (setf *last-created-response* resp)
     text))
+
+(defun replace-tags (string)
+  "This function replace the space and newline tags in a string"
+  (format nil (regex-replace-all "\\\\n" (regex-replace-all "\\\\s" string " ") "~%")))
+
+(defun continue-response (string)
+  "Appends text to the previous response"
+  (let ((current-text (get-prop *last-created-response* :text))
+	(new-text (clean-string string)))
+    (setf (get-prop *last-created-response* :text)
+	  (replace-tags (format nil "~a~a" current-text new-text)))))
 
 (defun first-nonspace-char (string)
   "Receives a string and returns the first non space character"
@@ -39,6 +66,7 @@
     (case command
       (#\+ (add-trigger line))
       (#\- (add-response line))
+      (#\^ (continue-response line))
       (otherwise nil))))
 
 (defun read-doc (stream)
@@ -69,3 +97,4 @@
   (read-doc stream)
   (loop for input = (get-input) until (string= "bye" (car input))
      do (format t "~a~%" (select-response (get-answers input)))))
+

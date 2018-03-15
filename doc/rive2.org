@@ -1,0 +1,162 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+* Creating a CL-Rivescript Interpreter (Part 2)
+
+** Multiline responses.
+I will try to make my following posts be more digestible in size. The plan is to make incremental improvements, making my interpreter behave more and more like the [[https://www.rivescript.com/wd/RiveScript][rivescript working draft]]. We implemented the bare bones of "+" and "-", today I want to implement "^" (the continue command) which should be fairly easy, this command allows to define a response across several lines, here is one example:
+
+#+BEGIN_EXAMPLE
+  + tell me a poem 
+  - Little Miss Muffit sat on her tuffet\n
+  ^ in a nonchalant sort of way.\n
+  ^ With her forcefield around her,\n
+  ^ the Spider, the bounder,\n
+  ^ Is not in the picture today.
+#+END_EXAMPLE
+
+In this case, not only the responses continue in subsequent lines but also the "\n" at the end of each line makes it print each line separately, so it really looks like a poem. Asides from the "\n" tag there is a "\s" tag which represents a space, since rivescript should ignore all trailing spaces in the line, the space tag is needed to place a space explicitly.
+
+It means we have to do 3 things:
+1. Fix the code of the "-" command so it eliminates trailing spaces
+2. Modify the code so we can append the contents of a response and any potential continue commands.
+3. Make sure we substitue the "\n" and "\s" tags by the corrsponding symbols either when we store the text or when we display it. I will go for doing it when we store it.
+
+The first task should be very straight forward. We will start by writing a function to clean the text which will substitute the ugly mess we have in the ~add-response~ function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun clean-string (string)
+    (let ((text (string-trim '(#\space #\tab) string)))
+      (format nil "~{~a~^ ~}" (cdr (split "\\s+" text)))))
+#+END_SRC
+
+This one is a bit different, the idea is that by trimming spaces and tabs from the line, and then splitting by multiple spaces, the ~format~ function joins everything with single spaces, this might be unnecessary but it gets rid of all unnecessary spaces. Then we substitute this in ~add-response~ and that takes care of the first task.
+
+#+BEGIN_SRC lisp :exports code
+  (defun add-response (string)
+    "Adds a response and ties it to the latest trigger created"
+    (let ((text (clean-string string))
+          (resp (node-create :label :response)))
+      (setf (get-prop resp :text) text)
+      (link-create :responds resp *last-created-trigger*
+                   :properties '(:weight 1))
+      text))
+#+END_SRC
+
+Let's focus on the second task now, the nice thing about this is that we know that continue commands apply to the previous response command, so all we have to do is set the text property of the response node to be the previous one concatenated with the text in the continue line. So we will adopt a similar strategy to what we did with triggers, that is, adding a variable that links to the latest response, and then use that when appending. That will also require to modify ~add-response~ a bit more. Oh and I almost forgot, we also need to add the command to the ~do-command~ function so it executes when we read the brain.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *last-created-response* nil
+    "A variable to contain the last response for easy linking")
+
+  (defun add-response (string)
+    "Adds a response and ties it to the latest trigger created"
+    (let ((text (clean-string string))
+          (resp (node-create :label :response)))
+      (setf (get-prop resp :text) text)
+      (link-create :responds resp *last-created-trigger*
+                   :properties '(:weight 1))
+      (setf *last-created-response* resp)
+      text))
+
+  (defun continue-response (string)
+    "Appends text to the previous response"
+    (let ((current-text (get-prop *last-created-response* :text))
+          (new-text (clean-string string)))
+      (setf (get-prop *last-created-response* :text)
+            (format nil "~a~a" current-text new-text))))
+
+  (defun do-command (line)
+    "Call the appropriate function to process the current line"
+    (let ((command (first-nonspace-char line)))
+      (case command
+        (#\+ (add-trigger line))
+        (#\- (add-response line))
+        (#\^ (continue-response line))
+        (otherwise nil))))
+
+#+END_SRC 
+
+That is not too bad, but it would be nice to be able to add commands without having to worry about the ~do-command~ function, we will fix that in the next post, rivescript does not have a ton of commands, but fixing that will make our code cleaner.
+
+To test this I added the text in the example above to ~*brain*~.
+
+#+BEGIN_SRC lisp :exports code
+  (defparameter *brain*
+    "+ hello bot
+  - Hello, human!
+  + how are you
+  - I'm great, how are you?
+  - I'm good, you?
+  - Good :) you?
+  - Great! You?
+  - I'm fine, thanks for asking!
+  + tell me a poem 
+  - Little Miss Muffit sat on her tuffet\\n
+  ^ in a nonchalant sort of way.\\n
+  ^ With her forcefield around her,\\n
+  ^ the Spider, the bounder,\\n
+  ^ Is not in the picture today.
+  ")
+
+#+END_SRC
+
+We have not tackled the third task but we can test what we have until now to make sure the new command works as advertised. Since I have not yet implemented a command to clean the database, I restarted the Lisp and executed main again, the same way we did in the last post. Here is a transcript of the conversation.
+
+#+BEGIN_EXAMPLE
+CL-RIVESCRIPT> (main (make-string-input-stream *brain*))                                                                             
+I don't understand                                                            
+Hello, bot!                                                                   
+Hello, human!                                                                 
+How are you?                                                                  
+I'm great, how are you?                                                       
+Tell me a poem                                                                
+Little Miss Muffit sat on her tuffet\nin a nonchalant sort of way.\nWith her f
+orcefield around her,\nthe Spider, the bounder,\nIs not in the picture today. 
+bye                                                                           
+NIL                                                                           
+#+END_EXAMPLE
+
+Things are working OK, but as you can see the poem contains the \n tag literally, so it does not look nice, we have to replace the two allowed tags in the string when we store it, to have this showing nicely.
+
+This is what I ended up including in the code.
+
+#+BEGIN_SRC lisp :exports code
+  (defun replace-tags (string)
+    "This function replace the space and newline tags in a string"
+    (format nil (regex-replace-all "\\\\n" (regex-replace-all "\\\\s" string " ") "~%")))
+
+  (defun continue-response (string)
+    "Appends text to the previous response"
+    (let ((current-text (get-prop *last-created-response* :text))
+          (new-text (clean-string string)))
+      (setf (get-prop *last-created-response* :text)
+            (replace-tags (format nil "~a~a" current-text new-text)))))
+#+END_SRC
+
+The ~replace-tags~ function first repalces all occurrences of "\s" by a space, since both =cl-ppcre= (because it is perl compatible) and common-lisp require escaping the backslashes we end up with four of them, these are actually two escaped backslashes. After doing this it replaces all "\n" by a new line, using format to do it, I think I could just simply make the replacement string be an enter, but I think this makes it clearer, and a chat bot does not need to be very efficient.
+
+This takes care of our third task, and finally we have a transcript of the conversation to show this working.
+
+#+BEGIN_EXAMPLE
+CL-RIVESCRIPT> (main (make-string-input-stream *brain*))
+I don't understand
+Hello, bot!
+Hello, human!
+How are you?
+I'm great, how are you?
+Tell me a poem
+Little Miss Muffit sat on her tuffet
+in a nonchalant sort of way.
+With her forcefield around her,
+the Spider, the bounder,
+Is not in the picture today.
+bye
+NIL
+CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+In case you are wondering, I am executing this in the command line, because I have some problems with auto complete in EMACS when trying to chat with the bot in the slime repl, when I execute it in the terminal it reads a line before I even write anything and that is why it always replies "I don't understand" first, this is something I will fix later, and it does not happen in the slime repl, for now we accomplished what we wanted in this post.
+
+#  LocalWords:  rivescript repl
