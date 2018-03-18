@@ -31,10 +31,6 @@
     (setf *last-created-trigger* (node-create :label :trigger))
     (setf (get-prop *last-created-trigger* :text) text))) 
 
-(defun clean-string (string)
-  (let ((text (string-trim '(#\space #\tab) string)))
-    (format nil "~{~a~^ ~}" (cdr (split "\\s+" text)))))
-
 (defun add-response (string)
   "Adds a response and ties it to the latest trigger created"
   (let ((text (clean-string string))
@@ -45,20 +41,12 @@
     (setf *last-created-response* resp)
     text))
 
-(defun replace-tags (string)
-  "This function replace the space and newline tags in a string"
-  (format nil (regex-replace-all "\\\\n" (regex-replace-all "\\\\s" string " ") "~%")))
-
 (defun continue-response (string)
   "Appends text to the previous response"
   (let ((current-text (get-prop *last-created-response* :text))
 	(new-text (clean-string string)))
     (setf (get-prop *last-created-response* :text)
 	  (replace-tags (format nil "~a~a" current-text new-text)))))
-
-(defun first-nonspace-char (string)
-  "Receives a string and returns the first non space character"
-  (aref (remove #\tab (remove #\space string)) 0))
 
 (defun do-command (line)
   "Call the appropriate function to process the current line"
@@ -97,4 +85,3 @@
   (read-doc stream)
   (loop for input = (get-input) until (string= "bye" (car input))
      do (format t "~a~%" (select-response (get-answers input)))))
-

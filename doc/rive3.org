@@ -1,0 +1,133 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+* Creating a CL-Rivescript Interpreter (Part 3)
+
+I know I said I would tackle the task of creating a DSL for adding commands, but I decided to do two things before that, the first was to reorganize the code a bit, basically I moved some of the functions to a utilities.lisp file, and made some changes to the system definition file, those are just organizational changes but I thought I should mention it.
+
+The second thing I did is I created a couple of utility functions to deal with weighted responses, I think it is nice to explain this now, and in future posts we will create the code to select responses with weights.
+
+** The Loaded die
+
+My initial approach was going to be a dumb one, just make a list and make as many copies of each option as the weight for it, but I did not like the solution, so I decided to go for something different. I'll explain with a loaded die example. Imagine you want to create a six sided die that falls on 3 more often than in any other number, lets say we want it to happen 50 times more often than the other numbers, we could represent the loaded die as an alist where the car of each element is the number of pips and the cdr is the weight.
+
+#+BEGIN_SRC lisp :exports code
+  (defparameter *loaded-die*
+    '((1 . 1)
+      (2 . 1)
+      (3 . 50)
+      (4 . 1)
+      (5 . 1)
+      (6 . 1))
+    "Represents a loaded die which falls on 3 most of the time")
+#+END_SRC
+
+#+RESULTS:
+: *LOADED-DIE*
+
+What we want is to generate a random number between 0 and the sum of the weights minus one, that is achieved easily with the built in ~random~ function, but we need to get the sum of all weights, which is very straight forward.
+
+#+BEGIN_SRC lisp :exports both
+  (reduce #'+ *loaded-die* :key #'cdr)
+#+END_SRC
+
+#+RESULTS:
+: 55
+
+That is, adding all cdr numbers, the result in this case is 55. Now we need to create another alist based on the ~*loaded-die*~ which has the accumulated weight in the cdr.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *cumul-die*
+    (do ((weighted *loaded-die* (cdr weighted))
+         (acc (cdar *loaded-die*) (+ acc (cdar weighted)))
+         (result nil (cons (cons (caar weighted) (1- acc)) result)))
+        ((null weighted) result)))
+#+END_SRC
+
+#+RESULTS:
+: *CUMUL-DIE*
+
+I wrote this little snippet to show the contents in emacs, because it was not showing well in the org results.
+
+#+BEGIN_SRC lisp :exports both
+  (let ((out (make-string-output-stream)))
+    (dolist (e *cumul-die* (get-output-stream-string out))
+      (format out "~a -> ~a~%" (car e) (cdr e))))
+#+END_SRC
+
+#+RESULTS:
+: 6 -> 54
+: 5 -> 53
+: 4 -> 52
+: 3 -> 2
+: 2 -> 1
+: 1 -> 0
+
+The numbers are in reverse order but that is OK, because for the next step I need them in reverse cumulative weight order, which is already so.
+
+So if I generate a random number as described above and remove any numbers greather than that, selecting the first number in the resulting list will accomplish what we want, you can see that if I remove all cdrs greater than 0 only (1 . 0) remains, if I eliminate the ones greater than 1 the first element is (2 . 1), and then from 2 to 52 the (3 . 2) combination gets selected, making it be selected 50 of every 55 times.
+
+This is the code to do that.
+#+BEGIN_SRC lisp :exports both
+  (let ((rnd (random 55)))
+    (caar (remove-if #'(lambda (n) (> n rnd)) *cumul-die* :key #'cdr)))
+#+END_SRC
+
+#+RESULTS:
+: 3
+
+This resulted in a 3 this time, which was very likely given the odds, but how do we know if all of this is working correctly, the best way is to do a bunch of trows and look at the stats. I will start by making all of the preceeding steps into a usable function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun cumulative-weight (list)
+    "Returns a list with the cumulative weights"
+    (do ((wlist list (cdr wlist))
+         (acc (cdar list) (+ acc (cdar wlist)))
+         (result nil (cons (cons (caar wlist) (1- acc)) result)))
+        ((null wlist) result)))
+
+
+  (defun weighted-random (list)
+    "Receives an alist of options and weights and selects accoring to the weights"
+    (let* ((len (reduce #'+ list :key #'cdr))
+           (wlist (cumulative-weight list))
+           (rnd  (random len)))
+      (caar (remove-if #'(lambda (n) (> n rnd)) wlist :key #'cdr))))
+
+#+END_SRC
+
+#+RESULTS:
+: WEIGHTED-RANDOM
+
+All of the things we did by hand before are factored here, which is what we need to later incorporate this technique in our rivescript interpreter.
+
+Lets do a 100 rolls, 50 ouf of every 55 rolls should be a 3 (that is around 91%).
+
+To count the rolls we can use this function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun count-die-rolls (list)
+    "Cout frequency of each rolln dice in a list"
+    (let ((acc (make-sequence 'list 6 :initial-element 0)))
+      (dolist (pips list acc) (incf (nth (1- pips) acc)))))
+
+#+END_SRC
+
+#+RESULTS:
+: COUNT-DIE-ROLLS
+
+And now we do the rolls and check.
+
+#+BEGIN_SRC lisp :exports both
+  (count-die-rolls (loop for i from 1 upto 100 collect (weighted-random *loaded-die*)))
+#+END_SRC
+
+#+RESULTS:
+| 3 | 2 | 88 | 0 | 4 | 3 |
+
+Which is more or less what we expected, in this case since we did 100 rolls, the distribution shows 88% of the times we rolled a 3.
+
+That is it for this post, in the next one we will tackle the DSL for adding commands to the interpreter.
+
+#  LocalWords:  alist rivescript

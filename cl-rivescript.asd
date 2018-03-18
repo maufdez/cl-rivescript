@@ -8,4 +8,5 @@
   :serial t
   :depends-on (#:cl-ppcre #:cl-protograph)
   :components ((:file "package")
-               (:file "cl-rivescript")))
+	       (:file "utilities" :depends-on ("package"))
+               (:file "cl-rivescript" :depends-on ("package" "utilities"))))
