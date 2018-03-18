@@ -1,0 +1,84 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+* Creating a CL-Rivescript Interpreter (Part 4)
+
+Today we are going to create a macro to add commands to the interpreter, this will take care of two things, the function declaration, and assigning it to the right command character for ~do-command~ to work correctly, the convention I've been following until now is simple, all functions receive a complete line of text, any parsing or processing needed is done inside the function. I think in this case it is a good convention since all information for processing each line is included in it and in the variables that are used for context (currently ~*last-created-trigger*~ and ~*last-created-response*~).
+
+The approach will be simple, we will create yet another alist, and make the car be the command and the cdr be a function object, so ~do-command~ will look for the command, if it finds it, it will funcall the function in the cdr, if not it will return nil.
+
+Lets start by defining the list for the commands and the macro.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *rivescript-commands* ()
+    "This is an alist containing the commands and associated functions")
+
+  (defmacro def-rs-command (char lambdalist &body body)
+    (let ((f (gensym)))
+      `(flet ((,f ,lambdalist
+                ,@body))
+         (pushnew (cons ,char #',f) *rivescript-commands* :key #'car))))
+
+#+END_SRC
+
+The macro ~def-rs-command~ is purposely meant to mimic a ~defun~, but instead of the function name it accepts a character which is a rivescript command, so to make the changes in the program is very straightforward, you just replace ~defun~ by ~def-rs-command~ and eliminate the doc string (my macro does not accept a doc string), by accepting a lambda list instead of using an implicit variable we are trying to respect referential transparency, and at the same time allow ourselves some freedom in case we change our convention of passing the string.
+
+Here are the redefinitions of the command functions, and the new ~do-command~ definition.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\+ (string)
+    (let ((text (cdr (split "\\s" string))))
+      (setf *last-created-trigger* (node-create :label :trigger))
+      (setf (get-prop *last-created-trigger* :text) text))) 
+
+  (def-rs-command #\- (string)
+    (let ((text (clean-string string))
+          (resp (node-create :label :response)))
+      (setf (get-prop resp :text) text)
+      (link-create :responds resp *last-created-trigger*
+                   :properties '(:weight 1))
+      (setf *last-created-response* resp)
+      text))
+
+  (def-rs-command #\^ (string)
+    (let ((current-text (get-prop *last-created-response* :text))
+          (new-text (clean-string string)))
+      (setf (get-prop *last-created-response* :text)
+            (replace-tags (format nil "~a~a" current-text new-text)))))
+
+  (defun do-command (line)
+    "Call the appropriate function to process the current line"
+    (let* ((cmd-char (first-nonspace-char line))
+           (cmd (assoc cmd-char *rivescript-commands* :test #'char=)))
+      (when cmd (funcall (cdr cmd) line))))
+
+#+END_SRC
+
+So now, every time we want to add a new command we just use the ~def-rs-command~ macro, which saves us the steps of defining functions and adding them to a case statement.
+
+In the git repository I am adding the new global variable and the macro definition in =utilities.lisp=, so the main file looks a bit cleaner, I should probably create another file for macros and special variables, but for now is not too bad.
+
+Since we do want to test that everything still works, here is the transcript of the last conversation with these changes.
+
+#+BEGIN_EXAMPLE
+CL-RIVESCRIPT> (main (make-string-input-stream *brain*))
+I don't understand
+Hello, bot!
+Hello, human!
+How are you?
+I'm great, how are you?
+Tell me a poem
+Little Miss Muffit sat on her tuffet
+in a nonchalant sort of way.
+With her forcefield around her,
+the Spider, the bounder,
+Is not in the picture today.
+bye
+NIL
+CL-RIVESCRIPT
+#+END_EXAMPLE
+
+This was an easy one to write and I feel it did not have anything too complicated so it didn't need in depth explanations. In the next post I will tackle the proper brain structure, so we can write a better ~main~ function, and we will also do some cosmetic work, that way when we dive into deeper waters we can more easily distinguish what we said from what the bot replied.
+
+#  LocalWords:  funcall alist rivescript

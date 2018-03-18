@@ -25,14 +25,12 @@
 (defvar *last-created-response* nil
   "A variable to contain the last response for easy linking")
 
-(defun add-trigger (string)
-  "Adds nodes of type trigger to the database"
+(def-rs-command #\+ (string)
   (let ((text (cdr (split "\\s" string))))
     (setf *last-created-trigger* (node-create :label :trigger))
     (setf (get-prop *last-created-trigger* :text) text))) 
 
-(defun add-response (string)
-  "Adds a response and ties it to the latest trigger created"
+(def-rs-command #\- (string)
   (let ((text (clean-string string))
         (resp (node-create :label :response)))
     (setf (get-prop resp :text) text)
@@ -41,21 +39,11 @@
     (setf *last-created-response* resp)
     text))
 
-(defun continue-response (string)
-  "Appends text to the previous response"
+(def-rs-command #\^ (string)
   (let ((current-text (get-prop *last-created-response* :text))
 	(new-text (clean-string string)))
     (setf (get-prop *last-created-response* :text)
 	  (replace-tags (format nil "~a~a" current-text new-text)))))
-
-(defun do-command (line)
-  "Call the appropriate function to process the current line"
-  (let ((command (first-nonspace-char line)))
-    (case command
-      (#\+ (add-trigger line))
-      (#\- (add-response line))
-      (#\^ (continue-response line))
-      (otherwise nil))))
 
 (defun read-doc (stream)
   "This funciton reads the brain from a stream"
