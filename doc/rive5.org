@@ -1,0 +1,156 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+* Reading a RiveScript brain.
+
+Since the ~*brain*~ variable will become more complex and long as we go along, and because we have to do this at some point anyway, we will do it sooner rather than later. The rivescript working draft does not talk much about how the brain is structured, however the rivescript tutorial does have a section called "[[https://www.rivescript.com/docs/tutorial#anatomy-of-a-rivescript-brain][ANATOMY OF A RIVESCRIPT BRAIN]]" which explains some details. With that along with some clues gotten from other parts of the tutorial and the working draft, I can create some code that matches my interpretation of how this should work. As I understand it, the brain is a directory with no subdirectories, where the rivescript documents reside, each document is a file with a =.rive= extension. As a convention there should be a =begin.rive= file which contains some declarations, I will create the begin file based on the tutorial and also the example file, which will have the contents of the ~*brain*~ variable, and since that variable won't be needed anymore I will eliminate it.
+
+Asides from modifying the ~main~ function to receive a path and process all =.rive= files in it, we will do some refinements to ~read-doc~ function. So far I have avoided some things in the ~*brain*~ variable, but we need to deal with comments and empty lines. I also want to modify ~get-input~ so there is a prompt, that will make it easier to distinguish the inputs from the outputs.
+
+To make the code more portable I will use [[https://edicl.github.io/cl-fad/#package-path][CL-FAD]] which is a library that adds a thin layer of code to manage file and directory operations, it is available through quicklisp, I won't replicate that in here but I am adding it to the =ASD= file and the =package.lisp=.
+
+Lets begin by writing yet another utility function, this one will check if a file has a given extension.
+
+#+BEGIN_SRC lisp :exports code
+  (defun file-ext (file)
+    "Receives a file designator and returns anything after the last dot in the name"
+    (let* ((name (file-namestring file))
+          (dotpos (position #\. name :from-end t :test #'char=)))
+      (when dotpos (subseq name (1+ dotpos)))))
+
+  (defun has-extension (str file)
+    "Receives a string representing the extension
+  and a file designator, and tells you if
+  the file has the given extension"
+    (string= str (file-ext file)))
+
+#+END_SRC
+
+As you can see I broke the implementation in two parts, as I think that being able to get the extension of a file is valuable, and states what we are doing. With that in place we can write a function to check if a file is a rive document, we will place that in the =cl-rivescript.lisp= file
+
+#+BEGIN_SRC lisp :exports code
+  (defun rivescript-doc-p (file)
+    "Tests if a given file is a rive document based on the extension"
+    (has-extension "rive" file))
+
+#+END_SRC
+
+And now we have to do some changes to ~read-doc~, the first thing is simple, we just have to use a file instead of a string.
+
+#+BEGIN_SRC lisp :exports code
+  (defun read-doc (file)
+    "This function reads the brain from a stream"
+    (with-open-file (stream file :direct :input)
+      (loop for line = (read-line stream nil 'eof)
+         until (eq line 'eof)
+         do (do-command line))))
+
+#+END_SRC
+
+I don't want to complicate ~do-command~, its function is to execute commands, we need to avoid passing it empty lines, we can also clean the line from any =//= comments before we pass it down to ~do-command~, so the line is clean of comments. Rivescript also have =/*= style comments, so we will need a bit of state to ignore lines util we reach a =*/=, the good thin is that =/*= style comments can not be used in-line. A backslash can be used to escape any or both slashes in case the user wants to include =//= as part of the reply.
+
+So the way I want to do this is to strip any in-line comments then check if the line is blank if it's not then execute ~do-command~, we also need a boolean to tell you if what you are reading is inside a multi-line comment or if it is just regular text, when you read a line, if it starts with a =/*= it will set the boolean if it contains a =*/= it will  unset it, and that will allow us to ignore the commented lines in between.
+
+One thing at a time, here is the code I added in the utilities file to toggle the ignore flag.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *spaces* '(#\space #\tab #\return))
+
+  (defparameter *ignore* nil
+    "A boolean to ignore multiline comments")
+
+  (defun toggle-ignore (rawline)
+    "Toggles *ignore* if the line contains the righ characters"
+    (let* ((line (string-trim *spaces*) rawline))
+           (len (length line)))
+      (if (and (not *ignore*)
+               (string= (subseq line 0 2) "/*"))
+          (setf *ignore* t)
+          (when (string= (subseq line (- len 2)) "*/")
+            (setf *ignore* nil)))))
+#+END_SRC
+
+The function is written to be called before and after ~do-command~ function, just in case there is a line that starts with =/*= and ends with =*/=, which is not explicitly forbidden by the working draft, even when it would be easier to use =//=, it will waste some time in most of the cases but it gets the work done. Now I want to create another function to remove comments, it has to also fix any escaped =//= so the line fed to ~do-command~ is clean. One thing I notice is that I trim spaces everywhere, I will likely factor it out later, for now I just added a variable ~*spaces*~, so I am consistent with the characters I am including in the bag every time.
+
+The code to remove comments is below, and a new function called ~process-line~ which will replace ~do-command~ in the ~read-doc~ function, the idea being that everything that has to be done to the line will be done there, for now is quite manageable.
+
+#+BEGIN_SRC lisp :exports code
+  (defun remove-comments (line)
+    "Removes the comments and fixes any escaped //"
+    (let ((slashpos (position #\/ line :from-end t :test #'char=))
+          (fixedline (regex-replace-all "\\\\/" line "/")))
+      (if (and (> slashpos 1)
+               (char= (aref line (- slashpos 2)) #\\))
+          fixedline
+          (if (char= (aref line (1- slashpos)) #\/)
+              (regex-replace-all "\\\\/" (string-right-trim *spaces* (subseq line 0 (1- slashpos))) "/")
+              fixedline))))
+
+  (defun process-line (line)
+    "Does the appropriate actions based on the line contents"
+    (let ((string (remove-comments (string-trim *spaces* line))))
+      (unless (string= "" string)
+        (toggle-ignore string)
+        (unless *ignore* (do-command string))
+        (toggle-ignore string)
+        string)))
+ 
+  (defun read-doc (file)
+    "This funciton reads the brain from a stream"
+    (with-open-file (stream file :direction :input)
+      (loop for line = (read-line stream nil 'eof)
+         until (eq line 'eof)
+         do (process-line line))))
+
+#+END_SRC
+
+The ~remvove-comments~ code looks for the last =/= in the line, checks if the character two spaces to the left of it (if there is one) is a =\= in which case it returns the fixed line (which is basically the line without escaped slashes), if the previous character is a =/= that indicates a comment and the function returns the trimmed subsequence up to the =//=, there are some cases that are not covered, but this should work for most cases. This is a convoluted example that would fail (=- Hello //This comment contains // itself=), the very long line is necessary because you cannot perform the substitution before checking if the comment is escaped.
+
+The ~process-line~ function first removes comments from the trimmed line, if what remains is an empty string it does nothing, otherwise it checks if the line is inside a multi-line comment, and if it is not it executes ~do-command~.
+
+Now we are ready to re-write the main function, to do that we will use the ~walk-directory~ function in CL-FAD, which makes it very easy.
+
+#+BEGIN_SRC lisp :exports code
+  (defun main (directory)
+    "Receives a brain directory and processes all .rive files"
+    (read-line)
+    (walk-directory directory #'read-doc :test #'rivescript-doc-p)
+    (loop for input = (progn
+                        (format t "~&> ")
+                        (force-output)
+                        (get-input))
+       until (string= "bye" (car input))
+       do (format t "~a~%" (select-response (get-answers input)))))
+
+#+END_SRC
+
+I created a =testbrain= directory which contains two files, =begin.rive= and =example.rive=, the contents come from the rivescript tutorial.
+We haven't added the "!" command yet, but that is ok, since ~do-command~ does not know anything about it, it will simply skip them. You will notice a ~read-line~ at the beginning, it is there to eliminate the first read in the SBCL CLI, so the bot does not respond "I don't understand", you will also notice a progn now after ~input =~ in the loop, this prints a prompt, and the ~force-output~ ensures the prompt is seen before the ~read-line~ inside of ~get-input~ is executed, I do not know how compatible this solution is with other implementations but it works well with SBCL on Windows.
+
+So what follows is the obligatory test and conversation transcript.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "testbrain")
+
+  > Hello bot!
+  Hello, human!
+  > How are you?
+  I'm great, how are you?
+  > tell me a poem
+  Little Miss Muffit sat on her tuffet
+  in a nonchalant sort of way.
+  With her forcefield around her,
+  the Spider, the bounder,
+  Is not in the picture today.
+  > How are you?
+  Great! You?
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+This time I asked "how are you?" two times, because I thoght I was getting the same answer every time, but as you can see that is not the case. In the next post we will deal with weights, which also will force us to deal with "{}" tags, so we'll see how that goes.
+
+#  LocalWords:  rivescript quicklisp CLI SBCL

@@ -2,23 +2,6 @@
 
 (in-package #:cl-rivescript)
 
-(defparameter *brain*
-  "+ hello bot
-- Hello, human!
-+ how are you
-- I'm great, how are you?
-- I'm good, you?
-- Good :) you?
-- Great! You?
-- I'm fine, thanks for asking!
-+ tell me a poem 
-- Little Miss Muffit sat on her tuffet\\n
-^ in a nonchalant sort of way.\\n
-^ With her forcefield around her,\\n
-^ the Spider, the bounder,\\n
-^ Is not in the picture today.
-")
-
 (defvar *last-created-trigger* nil
   "A variable to contain the last trigger for easy linking")
 
@@ -45,11 +28,25 @@
     (setf (get-prop *last-created-response* :text)
 	  (replace-tags (format nil "~a~a" current-text new-text)))))
 
-(defun read-doc (stream)
-  "This funciton reads the brain from a stream"
-  (loop for line = (read-line stream nil 'eof)
-     until (eq line 'eof)
-       do (do-command line)))
+(defun rivescript-doc-p (file)
+  "Tests if a given file is a rive document based on the extension"
+  (has-extension "rive" file))
+
+(defun process-line (line)
+  "Does the appropriate actions based on the line contents"
+  (let ((string (remove-comments (string-trim *spaces* line))))
+    (unless (string= "" string)
+      (toggle-ignore string)
+      (unless *ignore* (do-command string))
+      (toggle-ignore string)
+      string)))
+
+(defun read-doc (file)
+  "This function reads the brain from a stream"
+  (with-open-file (stream file :direction :input)
+    (loop for line = (read-line stream nil 'eof)
+       until (eq line 'eof)
+       do (process-line line))))
 
 (defun get-input ()
   "Gets a line of input from the user"
@@ -68,8 +65,14 @@
   "Randomly select one response from a list"
   (when list (nth (random (length list)) list)))
 
-(defun main (stream)
-  "Get a brain reads it and starts a loop"
-  (read-doc stream)
-  (loop for input = (get-input) until (string= "bye" (car input))
+(defun main (directory)
+  "Receives a brain directory and processes all .rive files"
+  (read-line)
+  (walk-directory directory #'read-doc :test #'rivescript-doc-p)
+  (loop for input = (progn
+		      (format t "~&> ")
+		      (force-output)
+		      (get-input))
+     until (string= "bye" (car input))
      do (format t "~a~%" (select-response (get-answers input)))))
+
