@@ -14,13 +14,14 @@
     (setf (get-prop *last-created-trigger* :text) text))) 
 
 (def-rs-command #\- (string)
-  (let ((text (clean-string string))
-        (resp (node-create :label :response)))
-    (setf (get-prop resp :text) text)
-    (link-create :responds resp *last-created-trigger*
-		 :properties '(:weight 1))
-    (setf *last-created-response* resp)
-    text))
+  (multiple-value-bind (newstring weight-str) (get-curly-var "weight" string "1")
+    (let* ((text (clean-string newstring))
+	   (resp (node-create :label :response))
+	   (lnk (link-create :responds resp *last-created-trigger*)))
+      (setf (get-prop resp :text) text)
+      (setf (get-prop lnk :weight)(parse-integer weight-str :junk-allowed t))
+      (setf *last-created-response* resp)
+      text)))
 
 (def-rs-command #\^ (string)
   (let ((current-text (get-prop *last-created-response* :text))
@@ -57,13 +58,14 @@
   "Gets a list of words forming a phrase to see if it matches any trigger"
   (let ((triggers (node-match :label :trigger :properties `(:text ,input))))
     (if triggers
-	(mapcar #'(lambda (trigger) (get-prop trigger :text))
-		(rec-search :to triggers :link-type :responds))
-	'("I don't understand"))))
+	(mapcar #'(lambda (link) (cons (get-prop (proto-graph::from-node link) :text)
+				       (get-prop link :weight)))
+		(link-search :to triggers :link-type :responds))
+	'(("I don't understand" . 1)))))
 
 (defun select-response (list)
   "Randomly select one response from a list"
-  (when list (nth (random (length list)) list)))
+  (when list (weighted-random list)))
 
 (defun main (directory)
   "Receives a brain directory and processes all .rive files"

@@ -9,4 +9,5 @@
   :depends-on (#:cl-fad #:cl-ppcre #:cl-protograph)
   :components ((:file "package")
 	       (:file "utilities" :depends-on ("package"))
-               (:file "cl-rivescript" :depends-on ("package" "utilities"))))
+	       (:file "tags" :depends-on ("package"))
+               (:file "cl-rivescript" :depends-on ("package" "utilities" "tags"))))

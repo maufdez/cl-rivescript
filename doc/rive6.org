@@ -1,0 +1,175 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 6)
+* Adding weights to our responses.
+
+I wanted to dedicate this post to adding weights to responses, so that you can tell the bot if a particular response would be more likely than another, we wrote code to help us with that task in a [[http://funlisp.blogspot.com/2018/03/creating-cl-rivescript-interpreter-part_17.html][previous post]], however the implementation requires two things, the first one is to be able to read the tag that assigns the weight and somehow assign the weight to the response, for that I am planning to assign the weight as a property of the link between the responses and the trigger, that way we can conceivably in the future assign responses with the same text to different triggers, this will reduce the amount of memory used, and reduce the number of records to look through in the database.
+
+The second related thing we have to worry about is reading tags, rivescript has several types of tags, it can use angle brackets =<tag>=, curly brackets ={tag}=, and one that we already dealt with, the backslash tags, we implemented =\s= and =\n= implicitly and =\\= as part of our code for removing comments, and there is an additional one =\#= which we have not implemented.
+
+In this post I will deal with the curly brackets, because I need it for testing, however the full implementation of curly bracket tags deserves its own post, so I will implement only the one for weight, trying to leave the implementation open for other types of tags, to make things more organized I will place all tag processing code in a separate file (=tags.lisp=).
+
+The first thing I wrote is a fairly long function which receives a variable name and the line to process and returns multiple values, the first being the string with the tag and tag contents removed and the second being the parsed value. I am using cl-ppcre's ~scan~ function, so I can easily create subsequences without making my regular expression too complex.
+
+#+BEGIN_SRC lisp :exports code
+   (defun get-curly-var (varname line &optional default)
+    "A function to get the weight for a response"
+    (let* ((len (length line))
+          (rgx (format nil "{\\s*~a\\s*=\\s*(.*?)}" varname))
+          (idxs (multiple-value-list (scan rgx line))))
+      (if (car idxs)
+          (destructuring-bind (match-start match-end vals-start vals-end) idxs
+            (values
+             (if (= match-end len)
+                 (string-right-trim *spaces* (subseq line 0 match-start))
+                 (concatenate 'string
+                                 (subseq line 0 match-start)
+                                 (subseq line match-end)))
+             (let ((value-start (elt vals-start 0))
+                   (value-end (elt vals-end 0)))
+               (if (= value-start value-end)
+                   default
+                   (string-right-trim *spaces* (subseq line value-start value-end))))))
+          (values line default))))
+
+#+END_SRC
+
+I will describe this a bit, so it does not look too mysterious, we use a regular expression to scan the line, scan returns nil if it does not match and multiple values if it does, in this case the first number is the start of the whole regular expression within the line, the second is the end, the third value is a vector of all the start positions of all the captured strings, in this case the value which is the only thing inside parenthesis, and the fourth value is a vector of all the end positions for the captured strings, if there are no matches ~multiple-value-list~ returns a list with a single element which is nil, so if ~(car idxs)~ is =nil= then the unprocessed line and the default value are returned. If there is a match, we use ~destructuring-bind~ to name the variables so we can understand the code better, we return two values, the first is the string with the matched text removed, there are two cases, in the first the matched expression is the last thing in the string, so we return everything before it, in the second, there is text after the matched expression, so it concatenates what comes before with what comes after. For the second value, if the captured string start and end position are the same it means there is nothing after the equal sign, and thus the default value is used (I should probably make it fail instead, but I want my parser to be very permisive), the other case for the captured text is where you simply return what matched, but we right trim the result in case there were any trailing spaces.
+
+I tested this function, and it works for all the cases I am interested in. Currently I can only see two possible variable names that can be passed to this function "weight" and "topic" and the actions for each are different, "topic" should set a user variable to tell the bot what the current topic for that user is, while weight should in our case set the weight property for the link between the current response and the trigger.
+
+So let's for now focus on the weight, we will worry about topics in a future post, what we need to do is modify the "-" rivescript command.
+
+#+BEGIN_SRC lisp :exports code
+(def-rs-command #\- (string)
+  (multiple-value-bind (newstring weight-str) (get-curly-var "weight" string "1")
+    (let* ((text (clean-string newstring))
+	   (resp (node-create :label :response))
+	   (lnk (link-create :responds resp *last-created-trigger*)))
+      (setf (get-prop resp :text) text)
+      (setf (get-prop lnk :weight)(parse-integer weight-str :junk-allowed t))
+      (setf *last-created-response* resp)
+      text)))
+
+#+END_SRC
+
+I used ~pushnew~ in the ~def-rs-command~, so if you just try to redefine the response command it will do nothing, there are several ways we can deal with this, which I had to do while testing this, I think the best one is to do a proper redefinition, that is, remove the old definition if there is one and then do what we are doing now, that way if you want to do many redefinitions you still keep your alist small. Other solution is to use ~push~ instead of ~pushnew~, but all copies of the function would remain in memory.
+
+#+BEGIN_SRC lisp :exports code
+  (defmacro def-rs-command (char lambdalist &body body)
+    (let ((f (gensym)))
+      `(flet ((,f ,lambdalist
+                ,@body))
+         (setf *rivescript-commands* (remove ,char *rivescript-commands* :test #'char= :key #'car))
+         (push (cons ,char #',f) *rivescript-commands*))))
+
+#+END_SRC
+
+If ~remove~ does not find elements to delete it just returns the same list, which is very convenient, and since we are removing the old instance we don't need to use ~pushnew~, so we are using ~push~ instead.
+
+With this new definition of the rivescript command we store a property in each link that corresponds to the weight, if the weight is not specified it will use a default value of 1. Weights are integers, and represent the likelihood of occurrence, out of the total, so if you have two responses one with weight two, and one with weight one, the one with weight two will be selected 2 out of 3 times.
+
+I will move the ~select-response~ to utilities and rename it ~random-elt~, as it is what it does, select a random element, but it does give equal odds to each element in the list, we can still use this functionality for the ={random}= tag when we implement it in the future, since it does not use weights. Now we have to redefine ~select-response~ to use ~weithted-random~, which implies that it should now receive an alist of responses and weights, the main loop calls ~select-response~ with the output of ~get-answers~, so we have to change the output of ~get-answers~ to match what is expected.
+
+Here are the new versions of ~get-answers~ and ~select-response~.
+
+#+BEGIN_SRC lisp :exports code
+(defun get-answers (input)
+  "Gets a list of words forming a phrase to see if it matches any trigger"
+  (let ((triggers (node-match :label :trigger :properties `(:text ,input))))
+    (if triggers
+	(mapcar #'(lambda (link) (cons (get-prop (proto-graph::from-node link) :text)
+				       (get-prop link :weight)))
+		(link-search :to triggers :link-type :responds))
+	'(("I don't understand" . 1)))))
+
+(defun select-response (list)
+  "Randomly select one response from a list"
+  (when list (weighted-random list)))
+
+#+END_SRC
+
+You will notice I substituted rec-search by link-search, so now I am getting a list of links, links are CLOS objects they have ~from-node~ and a ~to-node~ slots, bound to the nodes linked by it. You could represent it like this.
+
+#+BEGIN_EXAMPLE
+              weight
+[response]--(responds)-->[trigger]
+#+END_EXAMPLE
+
+So we needed to import the whole link because the weight is a property of the link, not of any of the nodes. You will notice that since I had not exported the readers for the from and to nodes from =proto-graph= I had to use a direct reference, I already fixed my local copy of =proto-graph= and I will update the git repository when I post this, but in case anybody was following and had the old =proto-graph= I left it like that.
+
+Now I need an example with weights, I will use the one in the tutorial's "[[https://www.rivescript.com/docs/tutorial#lets-talk-about-weight][Let's Talk About Weight]]" section, this lines will be added to the =example.rive= file in the =testbrain= directory.
+
+#+BEGIN_EXAMPLE
+  + greetings
+  - Hi there!{weight=20}
+  - Hello!{weight=25}
+  - Yos kyoco duckeb!
+#+END_EXAMPLE
+
+With this rivescript response weights the firs answer should appear 43.5% of the time, the second 54.3% and the last one around a 2.2%.
+
+I spammed the bot with greetings, so we can see the effect. As expected "Yos kyoco duckeb" did never trigger, and the other two answers appeard a lot of the time, I said "greetings" 14 times, it said "Hello!" four times, and "Hi there!" ten (which is about 70/30) in favor of "Hi there!", which is kind of unexpected, here is the transcript.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "testbrain")
+
+  > Hello bot!
+  Hello, human!
+  > How are you?
+  I'm great, how are you?
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hello!
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hello!
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hello!
+  > greetings
+  Hi there!
+  > greetings
+  Hi there!
+  > greetings
+  Hello!
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+Since I wanted to verify that my ~weighted-random~ function is working properly I did execute the thing 1000 times, here is the code and the results.
+#+BEGIN_SRC lisp :exports both
+  (let* ((rs (get-answers '("greetings")))
+         (runs (loop for i from 1 upto 1000 collect (weighted-random rs)))
+         (rstxt (remove-duplicates runs))
+         (resp nil))
+    (dolist (txt rstxt resp) (push (list txt (count txt runs :test #'string=)) resp)))
+#+END_SRC
+
+#+RESULTS:
+| Yos kyoco duckeb! |  26 |
+| Hello!            | 541 |
+| Hi there!         | 433 |
+
+The results are satisfactory, the percentages are close to the expected distribution.
+
+And that's it, I'm not sure what I want to do in the next post, but most likely I will use the leg-up from this post to create the code to deal with topics. I will continue to write these even without feedback, because it helps me program, but if you are reading and have doubts or comments please let me know.
+
+#  LocalWords:  rivescript alist alists CLOS

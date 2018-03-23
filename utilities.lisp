@@ -37,7 +37,8 @@
   (let ((f (gensym)))
     `(flet ((,f ,lambdalist
 	      ,@body))
-       (pushnew (cons ,char #',f) *rivescript-commands* :key #'car))))
+       (setf *rivescript-commands* (remove ,char *rivescript-commands* :test #'char= :key #'car))
+       (push (cons ,char #',f) *rivescript-commands*))))
 
 (defun clean-string (string)
   (let ((text (string-trim *spaces* string)))
@@ -50,6 +51,10 @@
 (defun first-nonspace-char (string)
   "Receives a string and returns the first non space character"
   (aref (remove #\tab (remove #\space string)) 0))
+
+(defun random-elt (list)
+  "Randomly select one response from a list"
+  (when list (nth (random (length list)) list)))
 
 (defun cumulative-weight (list)
   "Returns a list with the cumulative weights"
