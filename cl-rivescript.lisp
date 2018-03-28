@@ -8,18 +8,38 @@
 (defvar *last-created-response* nil
   "A variable to contain the last response for easy linking")
 
+(defvar *default-topic*
+  (node-create :label :topic :properties '(:text "random"))
+  "Default topic node")
+
+(defvar *current-topic* *default-topic*
+  "Points to the node currently being defined")
+
+(defun switch-topic (text &key (create nil))
+  "Switch to a different topic"
+  (let ((topic-node (car (node-match :label :topic :properties `(:text ,text)))))
+    (if topic-node
+	(setf *current-topic* topic-node)
+	(if create
+	    (setf *current-topic* (node-create :label :topic :properties `(:text ,text)))
+	    (setf *current-topic* *default-topic*)))))
+
 (def-rs-command #\+ (string)
   (let ((text (cdr (split "\\s" string))))
     (setf *last-created-trigger* (node-create :label :trigger))
+    (link-create :about *last-created-trigger* *current-topic*)
     (setf (get-prop *last-created-trigger* :text) text))) 
 
 (def-rs-command #\- (string)
-  (multiple-value-bind (newstring weight-str) (get-curly-var "weight" string "1")
-    (let* ((text (clean-string newstring))
+  (with-curly-vars
+      ((weight "1")
+       (topic (get-prop *current-topic* :text)))
+    (let* ((text (clean-string (assigning-curly-vars vars string)))
 	   (resp (node-create :label :response))
 	   (lnk (link-create :responds resp *last-created-trigger*)))
       (setf (get-prop resp :text) text)
-      (setf (get-prop lnk :weight)(parse-integer weight-str :junk-allowed t))
+      (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+      (link-create :about resp *current-topic*)
       (setf *last-created-response* resp)
       text)))
 

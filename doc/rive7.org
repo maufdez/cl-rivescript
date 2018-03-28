@@ -1,0 +1,172 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 7)
+
+* Handling Topics
+
+While we are in the process of adding curly bracket tags, the two atomic variables that can currently be implemented with these are ={weight=...}=, which we implemented in the previous post, and ={topic=...}= which we will implement in this one, however we won't just implement the tag processing, that would be too boring. We are going to tackle several problems.
+
+The ={topic=...} happens only in the response ("-") command, this is the same command we re-defined on our last post. Because of the way ~get-curly-var~ is written, we would have to nest ~multiple-value-bind~ calls, which is not very maintainable if in the future the working draft changes, adding more possible variable names that could be set. Ideally we want the method to be composable, if we did not care about the captured value we could just simply call ~get-curly-var~ on the results of the previous ~get-curly-var~, and the text would come out OK. The bad thing is that the captured results are lost in the process, and we cannot get them back.
+
+My solution is a bit odd, I don't know if anybody uses something similar, but what I am doing is creating a wrapper function around ~get-curly-var~, which receives a bound symbol name, and the string, and then using the symbol name as the =varname= in the ~get-curly-var~ call, asigns a value to the symbol value, this will allow us to compose the functions to get the right text, and at the same time, as a side effect, capture the values as variables.
+
+This is the code to do that.
+
+#+BEGIN_SRC lisp :exports code
+  (defun getting-curly-var (symbol text)
+    "Look for the symbol name as a curly var in the thext and assign the value to it"
+    (multiple-value-bind (new-text str-val)
+        (get-curly-var
+         (string-downcase (symbol-name symbol)) text (symbol-value symbol))
+      (setf (symbol-value symbol) str-val)
+      new-text))
+#+END_SRC
+
+I will give an example of how to use it, before we modify our response command.
+
+#+BEGIN_SRC lisp :exports both
+  (let ((topic "random")
+        (weight 1))
+    (declare (special topic weight))
+    (list (getting-curly-var
+           'topic (getting-curly-var
+                   'weight "- Yes {weight=3}{topic=RiveScript}"))
+          topic
+          weight))
+#+END_SRC
+
+#+RESULTS:
+| - Yes | RiveScript | 3 |
+
+The only thing that we need to do is previously declaring the variables with their default value, and declaring them special (otherwise the ~setf~ will error and state that the variable is not bound), you can see from the results we got what we wanted, the string at the end of all this is the clean string, the topic is now "RiveScript" and the weight is set to 3. This is already more maintainable, however we have to keep nesting ~getting-curly-var~ calls, so some abstraction could be nice.
+
+#+BEGIN_SRC lisp exports code
+  (defun assigning-curly-vars (varlist text)
+    "Apply getting-curly-var iteratively over a list of variables"
+    (do ((lst varlist (cdr lst))
+         (s text (getting-curly-var (car lst) s)))
+        ((null lst) s)))
+#+END_SRC
+
+This new function uses the previous one with the advantage that you can pass it a list of symbols and all of them are processed one after the other. It returns the final version of the string, and if the curly bracket variables are present it assigns the new value, otherwise it keeps the defaults.
+
+Here is an example use of ~assigning-curly-vars~.
+
+#+BEGIN_SRC lisp :exports both
+  (let ((weight "1")
+        (topic "random"))
+    (declare (special weight topic))
+    (list (assigning-curly-vars '(weight topic) "- Yes {weight=13}{topic=bad luck}") weight topic))
+#+END_SRC
+
+#+RESULTS:
+| - Yes | 13 | bad luck |
+
+This is neat, we can just make a longer list of variables if we needed in the future, but every time you add a variable you have to add it in three places, the let, the special and the ~assigning-curly-vars~ call, this is begging to be simplified using a macro. Following Siebel's advice (from Practical Common Lisp in chapter [[http://www.gigamonkeys.com/book/practical-parsing-binary-files.html][Chapter 24]]), we will first imagine how our macro would look, and for that we will use the response command definition.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\- (string)
+    (with-curly-vars
+        ((weight "1")
+         (topic "random"))
+      (let* ((text (clean-string (assigning-curly-vars vars string)))
+             (resp (node-create :label :response))
+             (lnk (link-create :responds resp *last-created-trigger*)))
+        (setf (get-prop resp :text) text)
+        (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+        (setf *current-topic* topic)
+        (setf *last-created-response* resp)
+        text)))
+
+#+END_SRC
+
+It does not save too much writing, but if we need to add more variables we just do it at the top, there is an implicit variable that we will need to create (~vars~) so we don't have to write the list manually when we call ~assigning-curly-vars~. For the moment being we are assuming there is a global variable ~*currrent-topic*~ which contains the current topic. The ~with-curly-vars~ macro should not be difficult to write.
+
+This is what I ended up writing.
+
+#+BEGIN_SRC lisp :exports code
+  (defmacro with-curly-vars (defaults &body body)
+    "Defines a set of variables and default values to be used by assigning-curly-vars"
+    (let ((vars (mapcar #'car defaults)))
+      `(let ((vars ',vars),@defaults)
+         (declare (special ,@vars))
+         ,@body)))
+
+#+END_SRC
+
+We have to think on when things occur, the ~rs-commands~ we are defining get executed when we are reading the brain, if you think on the use case for topic, the idea is that when you look for the proper response, if the response contained a ={topic...}= tag it will switch topics, that means two things. What we really need to do for the response command is to store a property to switch topics, lets say =new-topic=. The second thing is that we need to be able to identify responses and triggers in a particular topic. 
+
+First thing first, what we are doing in our response definition is incorrect, lets fix it.
+
+ #+BEGIN_SRC lisp :exports code
+   (def-rs-command #\- (string)
+     (with-curly-vars
+         ((weight "1")
+          (topic *current-topic*))
+       (let* ((text (clean-string (assigning-curly-vars vars string)))
+              (resp (node-create :label :response))
+              (lnk (link-create :responds resp *last-created-trigger*)))
+         (setf (get-prop resp :text) text)
+         (setf (get-prop resp :new-topic) topic)
+         (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+         (setf *last-created-response* resp)
+         text)))
+
+ #+END_SRC
+
+There are two changes here, the first is that topic gets a default value of =*current-topic*=, the idea is that when we are parsing the file, if there is a label (">") command, of the form => topic ...=, the ~*current-topic*~ variable will be set to the proper value, and all triggers and responses below that will be related to that topic, until you find the =< topic= command, which returns the topic to be =random=. We could simply assign a property in the trigger nodes and store the current topic in it, but topics have inheritance, so it should be easier to define topic nodes and link the triggers and responses to the topics, if a link inherits from other it will link to it with a link of type =inherits-from=, then the heavy lifting will be done by the protograph queries.
+
+So right out of the bat we have to create a random topic that is the default topic for the bot.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *default-topic*
+    (node-create :label :topic :properties '(:text "random"))
+    "Default topic node")
+
+#+END_SRC
+
+Now we can create a function to switch topics, it should look for the topic, if it exists change the =*current-topic*= variable, if it does not exist it should either revert back to the ~*default-topic*~ or create the new topic and move to it, to select the behavior we will set a key in the call, the idea behind this is that we can use the same function to switch to existing topics or create new ones.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *current-topic* *default-topic*)
+
+  (defun switch-topic (text &key (create nil))
+    "Switch to a different topic"
+    (let ((topic-node (car (node-match :label :topic :properties `(:text ,text)))))
+      (if topic-node
+          (setf *current-topic* topic-node)
+          (if create
+              (setf *current-topic* (node-create :label :topic :properties `(:text ,text)))
+              (setf *current-topic* *default-topic*)))))
+#+END_SRC
+
+You can see that we redefined the ~*current-topic*~ variable, it will now point to a topic node instead of a string, so we have to yet again modify the response command and for the first time modify the trigger command to make use of topics.
+
+#+BEGIN_SRC lisp :exports code
+(def-rs-command #\+ (string)
+  (let ((text (cdr (split "\\s" string))))
+    (setf *last-created-trigger* (node-create :label :trigger))
+    (link-create :about *last-created-trigger* *current-topic*)
+    (setf (get-prop *last-created-trigger* :text) text))) 
+
+(def-rs-command #\- (string)
+  (with-curly-vars
+      ((weight "1")
+       (topic (get-prop *current-topic* :text)))
+    (let* ((text (clean-string (assigning-curly-vars vars string)))
+	   (resp (node-create :label :response))
+	   (lnk (link-create :responds resp *last-created-trigger*)))
+      (setf (get-prop resp :text) text)
+      (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+      (link-create :about resp *current-topic*)
+      (setf *last-created-response* resp)
+      text)))
+
+#+END_SRC
+
+So these two rivescript command definitions are ready to work with topics, however, right now the topics are only using memory and the program is not using them to select appropriate replies, we have to modify ~get-answers~, and we also have to implement labels to be able to put an example in the brain and test it. The post is already quite long, so I think I will continue in the next one.
+
+I hope you forgive me for leaving this one in an intermediate state, don't get me wrong, this is usable, but it should not behave different than the last version.
+#  LocalWords:  protograph rivescript

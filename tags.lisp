@@ -22,3 +22,23 @@
 		 (string-right-trim *spaces* (subseq line value-start value-end))))))
 	(values line default))))
 
+(defun getting-curly-var (symbol text)
+  "Look for the symbol name as a curly var in the thext and assign the value to it"
+  (multiple-value-bind (new-text str-val)
+      (get-curly-var
+       (string-downcase (symbol-name symbol)) text (symbol-value symbol))
+    (setf (symbol-value symbol) str-val)
+    new-text))
+
+(defun assigning-curly-vars (varlist text)
+  "Apply getting-curly-var iteratively over a list of variables"
+  (do ((lst varlist (cdr lst))
+       (s text (getting-curly-var (car lst) s)))
+      ((null lst) s)))
+
+(defmacro with-curly-vars (defaults &body body)
+  "Defines a set of variables and default values to be used by assigning-curly-vars"
+  (let ((vars (mapcar #'car defaults)))
+    `(let ((vars ',vars),@defaults)
+       (declare (special ,@vars))
+       ,@body)))
