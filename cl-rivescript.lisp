@@ -12,8 +12,15 @@
   (node-create :label :topic :properties '(:text "random"))
   "Default topic node")
 
+(defvar *default-answer*
+  (node-create :label :response
+	       :properties '(:text "I do not understand" :new-topic "random")))
+
 (defvar *current-topic* *default-topic*
   "Points to the node currently being defined")
+
+(defvar *user-topic* *default-topic*
+  "Points to the user's conversation topic")
 
 (defun switch-topic (text &key (create nil))
   "Switch to a different topic"
@@ -23,6 +30,21 @@
 	(if create
 	    (setf *current-topic* (node-create :label :topic :properties `(:text ,text)))
 	    (setf *current-topic* *default-topic*)))))
+
+(defun topic (&rest args)
+  "Define the contents of a conversation topic"
+  (when args
+    (let ((topic (switch-topic (car args) :create t))
+	  (includes (if (string= (cadr args) "includes")
+			(cddr args)
+			nil)))
+      (with-input-from-string (s (get-captured-text))
+	(loop for line = (read-line s nil 'eof)
+	   until (eq line 'eof)
+	   do (process-line line))
+	(loop for i from 1 for inc-topic in includes
+	   do (link-create :includes topic (switch-topic inc-topic :create t) :properties `(:order ,i))))))
+  (setf *current-topic* *default-topic*))
 
 (def-rs-command #\+ (string)
   (let ((text (cdr (split "\\s" string))))
@@ -38,6 +60,7 @@
 	   (resp (node-create :label :response))
 	   (lnk (link-create :responds resp *last-created-trigger*)))
       (setf (get-prop resp :text) text)
+      (setf (get-prop resp :new-topic) topic)
       (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
       (link-create :about resp *current-topic*)
       (setf *last-created-response* resp)
@@ -48,6 +71,17 @@
 	(new-text (clean-string string)))
     (setf (get-prop *last-created-response* :text)
 	  (replace-tags (format nil "~a~a" current-text new-text)))))
+
+(def-rs-command #\> (string)
+  (setf *label-capture* (make-text-capturer))
+  (setf *inside-label-p* t)
+  (setf *exit-label* (lambda () (exec-label-command string))))
+
+(def-rs-command #\< (string)
+  (declare (ignorable string))
+  (setf *inside-label-p* nil)
+  (exit-label)
+  (setf *label-capture* nil))
 
 (defun rivescript-doc-p (file)
   "Tests if a given file is a rive document based on the extension"
@@ -76,16 +110,25 @@
 
 (defun get-answers (input)
   "Gets a list of words forming a phrase to see if it matches any trigger"
-  (let ((triggers (node-match :label :trigger :properties `(:text ,input))))
+  (let* ((nodes-about (rec-search :to *user-topic* :link-type :about))
+	 (triggers (node-match :label :trigger
+			       :properties `(:text ,input)
+			       :nodes nodes-about))
+	 (response-links  (link-search :from nodes-about :link-type :responds)))
     (if triggers
-	(mapcar #'(lambda (link) (cons (get-prop (proto-graph::from-node link) :text)
+	(mapcar #'(lambda (link) (cons (from-node link)
 				       (get-prop link :weight)))
-		(link-search :to triggers :link-type :responds))
-	'(("I don't understand" . 1)))))
+		(link-search :to triggers :link-type :responds
+			     :link-list response-links))
+	(list (cons *default-answer* 1)))))
 
 (defun select-response (list)
-  "Randomly select one response from a list"
-  (when list (weighted-random list)))
+  (when list
+    (let* ((response-node  (weighted-random list))
+	   (text (get-prop response-node :text))
+	   (new-topic (get-prop response-node :new-topic)))
+      (setf *user-topic* (switch-topic new-topic :create nil))
+      text)))
 
 (defun main (directory)
   "Receives a brain directory and processes all .rive files"

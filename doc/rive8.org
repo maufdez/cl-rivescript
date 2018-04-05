@@ -1,0 +1,269 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 8)
+
+* Part 7 errata
+For some weird reason it seems like I committed a wrong version of the "-" rivescript command in my last post, at some point I dropped the line to set the =:new-topic= property, so instead of covering my tracks changing the git history and my previous post, to pretend I do not make mistakes, here is the corrected version.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\- (string)
+    (with-curly-vars
+        ((weight "1")
+         (topic (get-prop *current-topic* :text)))
+      (let* ((text (clean-string (assigning-curly-vars vars string)))
+             (resp (node-create :label :response))
+             (lnk (link-create :responds resp *last-created-trigger*)))
+        (setf (get-prop resp :text) text)
+        (setf (get-prop resp :new-topic) topic)
+        (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+        (link-create :about resp *current-topic*)
+        (setf *last-created-response* resp)
+        text)))
+
+#+END_SRC
+
+This only stores the topic name (=:text= property in the node), but that is enough to find the node since our ~switch-topic~ function is meant to ensure that there are no repeated topic text properties, so a search should find a unique node.
+
+* Implementing labels
+
+The labels are different in concept to the "+" and "-" commands, they have an opening command ">" some data inside it, and then a closing command "<", there are three types of labels according to the working draft, => begin=, => topic= and => object=, the things that happen inside are slightly different for each label, for /begin/, for example, =+ request= does not mean create a trigger with text "request", and after /object/ what follows is code in the language specified by the opening label command, these are called object macros and should be executed. Finally the one we care most about right now, the /topic/ label, does have regular rivescript commands in it, but should be somehow related to the topic(s) in the opening label.
+
+My strategy would be to have the opening label setup some environment and start the text capturing process, an then the closing label be the one executing the code. Since I have already left too many things half implemented I want to at least leave a skeleton for all three types of labels, in order to at least establish the logic we will use, and then I will fully flesh the topic implementation, so we can create an example an test it. In subsequent posts we will implement the other labels, as it becomes necessary. It might seem that I am going all over the place, but I am trying to implement things as they appear in the tutorial, however that sometimes, like in this case means taking a long detour.
+
+Let's write some code to capture text in a string.
+
+#+BEGIN_SRC lisp :exports code
+  (defun make-text-capturer ()
+    (let ((txt (make-array '(0) :element-type 'base-char :fill-pointer 0 :adjustable t)))
+      (list (lambda (line) (with-output-to-string (s txt) (write-line line s)))
+            (lambda () txt))))
+
+  (defvar *label-capture* (make-text-capturer))
+
+  (defun capture-text (line &optional (text-capturer *label-capture*))
+    (funcall (nth 0 text-capturer) line))
+
+  (defun get-captured-text (&optional (text-capturer *label-capture*))
+    (funcall (nth 1 text-capturer)))
+
+#+END_SRC
+
+I thought using closures the code to capture text could be made more simple, I like this solution, the text gets isolated inside the closure, and you can reassign ~*label-capture*~ to a new capturer to clean the string, and the old closure will be garbage collected.
+
+I decided the best place to capture text would be inside the ~do-command~ function itself, because it is where it makes more sense, this is the modified function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun do-command (line)
+    "Call the appropriate function to process the current line"
+    (let* ((cmd-char (first-nonspace-char line))
+           (cmd (assoc cmd-char *rivescript-commands* :test #'char=)))
+      (if (and *inside-label-p* (char/= cmd-char #\<))
+          (capture-text line)
+          (when cmd (funcall (cdr cmd) line)))))
+#+END_SRC
+
+As you can see we take advantage of the variables created in the ~let*~, if you are inside a label the new variable ~*inside-label-p*~ does decide if the text is used for execution or if it is captured, however we need to check for the closing label command "<", otherwise once we go into a label we would never execute anything, we'd just keep on capturing. The setting and clearing of ~*inside-label-p*~ will be handled in the label opening and closing commands respectively, since it is logically more sound to do it there.
+
+Now as we said at the beginning we have three types of label commands, so when we find a ">" sign we have to look at the following word after it, and that will be our command, as with the ~def-rs-command~ macro, it would be convenient to be able to define the label commands in a way that is maintainable in the future. The current structure of an opening label command is just a list without parenthesis, the first value is the name of the function, and the following are the arguments, so maybe we can get away with just using a regular ~defun~.
+
+We can use a ~read-from-string~, adding parenthesis, to the text and the second symbol (~cadr~) should be a symbol, which can be used with ~symbol-function~ to get to the function we are interested in, and then apply this function to the rest of the list, as strings, this is the code to do that.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-label-symbol (line)
+    "Gets the symbol associated with the label function"
+    (cadr (read-from-string (format nil "(~a)" line))))
+
+  (defun exec-label-command (line)
+    "Executes the function indicated by the label command"
+    (let ((args (cddr (split "\\s+" (string-trim *spaces* line)))))
+      (apply (symbol-function (get-label-symbol line)) args)))
+#+END_SRC
+
+With that code we can define functions for begin, topic and object. I should point out that  with this implementation the label command does not check that what follows the ">" is a valid word, it will still look for a function with that name and try to call it with the arguments provided, so typos might crash the program, or execute code not intended for a label. We will try to make some previsions without complicating the code.
+
+This would be the code for topic which is the only one we will implement in this post.
+
+#+BEGIN_SRC lisp :exports code
+  (defun topic (&rest args)
+    "Define the contents of a conversation topic"
+    (when args
+      (let ((topic (switch-topic (car args) :create t))
+            (includes (if (string= (cadr args) "includes")
+                          (cddr args)
+                          nil)))
+        (with-input-from-string (s (get-captured-text))
+          (loop for line = (read-line s nil 'eof)
+             until (eq line 'eof)
+             do (process-line line))
+          (loop for i from 1 for inc-topic in includes
+             do (link-create :includes topic (switch-topic inc-topic :create t) :properties `(:order ,i))))))
+    (setf *current-topic* *default-topic*))
+
+#+END_SRC
+
+The code uses the text following the topic keyword as a list of arguments, the first thing is the topic, so we use the text to create a topic node using ~switch-topic~, if by any chance the topic already exists it will just switch to it, the second thing is everything that goes after the includes keyword, if the includes keyword exist what follows is considered to be a list of topics included in the current one. The captured text is processed normally, but any triggers and responses are linked to the current topic node. Finally the topic is linked to the included topics in order using links of type =:includes=, and the link is given an =:order= property which will allow us to look first in the main topic and then in each of the included topics, in order, one advantage of using this scheme with nodes and links, is that the included topics can themselves include topics, and the query can pull everything. The last thing we do is return the current topic to be the default topic (which is "random").
+
+With that in place we can define the code for the =>= and =<= commands, however there is a minor complication, the opening text representing the label arguments, which need to be processed is present only in the =>= command, but we need to call the topic function when the code has already been captured that happens when we execute the =<= command. I was going to use cl-cont for this, but I think is overshoot for our use case, so I am just going to fake it a bit, first we will define a variable that will contain a closure to be set during the =>= code, and then we call it during the =<= command. This assumes there is no label nesting.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *exit-label* nil
+    "Meant to contain a closure that maintains the open label environment")
+
+  (defun exit-label ()
+    "Function to more clearly execute the exit-label closure"
+    (when (functionp *exit-label*)
+      (prog1 (funcall *exit-label*)
+        (setf *exit-label* nil))))
+
+  (def-rs-command #\> (string)
+    (setf *label-capture* (make-text-capturer))
+    (setf *inside-label-p* t)
+    (setf *exit-label* (lambda () (exec-label-command string))))
+
+  (def-rs-command #\< (string)
+    (declare (ignorable string))
+    (setf *inside-label-p* nil)
+    (exit-label)
+    (setf *label-capture* nil))
+
+#+END_SRC
+
+As you can see with this arrangement the =>= and =<= commands are very simple, the current draft would require to define only three functions, ~topic~, ~object~ and ~begin~, which luckily are not existing function names, but if any reserved word is used in the future we will have to rethink this. Note that we are using ~setf~ to work with the global variables, this is because we cannot use a closure over them since there are functions that would not work on the right variables. Setting ~*exit-label*~ to ~nil~ in the ~exit-label~ function ensures that we do not accidentally keep the function in memory.
+
+With these, we already have all the code to setup the topics during the script interpretation, but when we chat with the bot it will not care about topics because ~get-answers~ does not know anything about topics.
+
+As a reminder our previous code looks like this
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-answers (input)
+    "Gets a list of words forming a phrase to see if it matches any trigger"
+    (let ((triggers (node-match :label :trigger :properties `(:text ,input))))
+      (if triggers
+          (mapcar #'(lambda (link) (cons (get-prop (proto-graph::from-node link) :text)
+                                         (get-prop link :weight)))
+                  (link-search :to triggers :link-type :responds))
+          '(("I don't understand" . 1)))))
+#+END_SRC
+
+Let's first modify it for the case where we do not take topic inheritance into consideration. The chart below should help us write the correct query.
+
+#+CAPTION: Representation of the graph of a brain
+#+ATTR_HTML: :width 514 :height 400
+[[./rs_graph_no_inheritance.png]]
+
+In the past we were saying look for nodes that match the current *input*, then look for responses that link to it using =:responds= type links, and from that list create an association list containing the texts from the responses as the =car= and the weight of the link as the =cdr=. Lets assume the (a) trigger node matches the *input*, all the response nodes (A), (B) and (C), are linked to (a) but (A) and (B) are tied to topic (i) while (C) is tied to topic (ii), but this function does not take into consideration what the user topic is, so it will return all three responses and the corresponding weights.
+
+So let's say the user is talking about topic (i), we want to say, out of all the responses that are tied to topic (i), in our example chart (A) and (B), select those which are tied through =:responds= type links, to the trigger with a =:text= property matching the *input* and tied to the topic, in this case (a). This should yield a list with only (A) and (B) which are the appropriate responses. It is sufficiently complicated in natural language, but I think we can do a query that does this.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *default-answer*
+    (node-create :label :response
+                 :properties '(:text "I do not understand" :new-topic "random")))
+
+  (defun get-answers (input)
+    "Gets a list of words forming a phrase to see if it matches any trigger"
+    (let* ((nodes-about (rec-search :to *user-topic* :link-type :about))
+           (triggers (node-match :label :trigger
+                                 :properties `(:text ,input)
+                                 :nodes nodes-about))
+           (response-links  (link-search :from nodes-about :link-type :responds)))
+      (if triggers
+          (mapcar #'(lambda (link) (cons (from-node link)
+                                         (get-prop link :weight)))
+                  (link-search :to triggers :link-type :responds
+                               :link-list response-links))
+          (list (cons *default-answer* 1)))))
+
+#+END_SRC
+
+Let's see if this does what we want, first a side node, since we will need to recover the =:new-topic= property when there is one, we are changing our output to contain response nodes in the =car= of the association list, instead of just the response node text, that forces us to create a ~*default-answer*~ node, to emulate what we were doing before when did not find answers. Now for the main dish, the ~get-answers~ function, we look for all nodes which are =:about= the current ~*user-topic*~ (/nodes-about/), then we look  for all the /triggers/ matching the /input/ in that list of =:nodes=, finally we create a list of /response-links/ (of =:link-type= = =responds=), searching links starting =:from= the /nodes-about/. With this variables in place we look at the =link-list= stored in /response-links/, and select the ones that respond (=:link-type= = =:responds=) =:to= the /triggers/, the ~mapcar~ collects the matching response nodes, and the link weights into an a-list, which is the return value of our function. 
+
+In our main loop we call ~get-answers~ from inside a call to ~select-response~, which is expecting to receive a string in the =car= of each element of the association list, so we have to modify it, the output is used by format and it should be a string. We also want to use this chance to change the user topic if needed.
+
+#+BEGIN_SRC lisp :exports code
+  (defun select-response (list)
+    (when list
+      (let* ((response-node  (weighted-random list))
+             (text (get-prop response-node :text))
+             (new-topic (get-prop response-node :new-topic)))
+        (setf *user-topic* (switch-topic new-topic :create nil))
+        text)))
+
+#+END_SRC
+
+This function checks if it was passed an empty list, when the list is not empty it selects a node randomly based on the weights, it extracts the text for the response and the new topic text, switches topics if the topic exist, if it doesn't it switches to the default topic, and returns the extracted text, which is what the outside world is expecting from this function.
+
+This should be it for topics with no inheritance, we should be able to add something to the brain an test it. The example in the tutorial is not suitable for our current interpreter, so we will create our own, I will add this to our example.brain 
+
+#+BEGIN_EXAMPLE
+  > topic superman
+
+    /*
+    This example will be replaced in the future by the one in the tutorial,
+    right now we do not have pattern matching and that one requires it
+   */
+
+    + what is his weakness
+    - Louis Lane, I'm kidding is Kryptonite
+    - I don't know if I should tell you {weight=9}
+
+    + enough about superman
+    - Ok, if that is what you want {topic=random}
+
+  < topic
+
+  + i want to talk about superman
+  - That is a topic I know little about {topic=superman}
+  - I don't want to, I prefer Batman!
+#+END_EXAMPLE
+
+This will let us check that our labels are working correctly.
+
+Here is the customary conversation transcript.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "./testbrain")
+
+  > Hello, Bot!
+  Hello, human!
+  > I want to talk about Superman
+  That is a topic I know little about
+  > What is his weakness?
+  I don't know if I should tell you
+  > Enough about Superman
+  Ok, if that is what you want
+  > Tell me a poem
+  Little Miss Muffit sat on her tuffet
+  in a nonchalant sort of way.
+  With her forcefield around her,
+  the Spider, the bounder,
+  Is not in the picture today.
+  > What is his weakness?
+  I do not understand
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+We can see that the bot starts normally, then I asked it to talk about Superman it agreed on the first try, the chances were 50/50, when I asked about Superman's weakness it replied correctly (it had a 90% chance of selecting the reply we saw), then I told it I had enough about that subject, afterward I asked it to tell me a poem, it complied as expected, and finally I asked about "his" weakness again, but since we were no longer on the Superman topic it did not know what I was talking about. Everything seems to be working correctly with this limited testing, the bot went into the topic and out of it, and it has no access to replies which are out of topic.
+
+* Fixing a bug with the weighted random selection
+When I was testing I had a problem, which is unrelated to the code in this post, my ~weighted-random~ function had an error in logic which made it behave erratically, I did some debugging and found out that the ~cumulative-weight~ function was incorrect, I had to fix it to make the code work correctly, and since my policy is to not hide my errors, I will place a note on my original post to not mislead future readers if there are any, and redirect them here.
+
+Here is the new code for the ~cumulative-weight~ function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun cumulative-weight (list)
+    "Returns a list with the cumulative weights"
+    (let ((acc (reduce #'+ list :key #'cdr)))
+      (sort (loop for (val . weight) in list
+               collect (cons val (decf acc weight)))
+            #'> :key #'cdr)))
+
+#+END_SRC
+
+The second value returned bye the function was useful during debugging, so I will leave it there, it is just ignored by the calling functions.
+#  LocalWords:  rivescript protograph

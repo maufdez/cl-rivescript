@@ -97,8 +97,9 @@ This resulted in a 3 this time, which was very likely given the odds, but how do
 
 #+END_SRC
 
-#+RESULTS:
-: WEIGHTED-RANDOM
+#+BEGIN_CENTER
+*Note:* The code for the cummulative weight in this post is incorrect and was corrected in *Part 8*, you can check the right code in the repository.
+#+END_CENTER
 
 All of the things we did by hand before are factored here, which is what we need to later incorporate this technique in our rivescript interpreter.
 
