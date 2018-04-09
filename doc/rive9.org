@@ -1,0 +1,296 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 9)
+
+* Implementing Topic Inheritance
+
+After the last post I was unsure of what to do next, I think topics are sufficiently functional right now that I can move on with the tutorial, and the next thing in the tutorial is interesting for me, but I think leaving the topic implementation incomplete will probably cause us to forget to do it in the future, the tutorial never uses inheritance, and I may forget I did not implement it. On the other hand, inheritance could be solved using recursion, the code could call itself with the next topic when the current one yields no responses, this approach has a danger though, the brain could specify circular references, for example.
+
+#+BEGIN_EXAMPLE
+  > topic chicken includes egg
+   + what was first the chicken or the egg
+   - Depends on which chicken and which egg
+   - I'm just a bot, how should I know
+   - I don't think that is relevant
+  < topic
+
+
+  < topic egg includes chicken
+    + how do you like your eggs
+    - I am a bot, I don't eat eggs
+    - Virtual, the only way I can take them
+    - I don't know I never tasted one
+  < topic
+
+#+END_EXAMPLE
+
+If we tell it to look for replies in /chicken/ and it does not find any, it would go to /egg/ which will go back to /chicken/ and so forth, creating an infinite loop, which will never produce a reply. The RiveScript working draft says we must have a global variable called "depth" which will limit the number of recursions spend looking for a reply, but I want to use another technique on top of tracking the depth, I will pass a list of already visited topics, and avoid visiting a topic that is already in the list, so in the previous example if I start with the /egg/ then when we call the function wit topic /chicken/ it will avoid going back to /egg/ and thus stopping the recursion. Currently our search is performed directly on the ~get-answers~ function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-answers (input)
+    "Gets a list of words forming a phrase to see if it matches any trigger"
+    (let* ((nodes-about (rec-search :to *user-topic* :link-type :about))
+           (triggers (node-match :label :trigger
+                                 :properties `(:text ,input)
+                                 :nodes nodes-about))
+           (response-links  (link-search :from nodes-about :link-type :responds)))
+      (if triggers
+          (mapcar #'(lambda (link) (cons (from-node link)
+                                         (get-prop link :weight)))
+                  (link-search :to triggers :link-type :responds
+                               :link-list response-links))
+          (list (cons *default-answer* 1)))))
+
+#+END_SRC
+
+Let's think first about how this works, the function works based on a topic stored in the ~*user-topic*~ variable (that might change in the future when we implement RiveScript variables), it then uses that information to find triggers and responses that are related to the topic, so if we add an aditional optional argument to receive the topic, which has a default value of ~*user-topic*~, we could be able to select a topic on demand. And what about a list of visited topics, that can be another optional argument with a default value of ~nil~, and we can add another optional argument for the current depth with a default value of one. To look into the included topics (if there are any) we should change our else branch in the if to be a loop which looks in each of the included topics in order. We have to perform the searches each time we switch topics, since the /input/ text needs to be matched to a trigger belonging to the new topic. OK, we talked the talk, now let's walk the walk.
+
+#+BEGIN_SRC lisp :exports code
+  (defun included-topic (order list)
+    "Receives an integer and a list of included topics,
+  returns the node with the matching :order property"
+    (to-node (car (link-match :properties `(:order ,order) :links list))))
+
+  (defun get-answers (input &optional (topic *user-topic*) (depth 1) hist)
+    "Gets a list of words forming a phrase to see if it matches any trigger"
+    (let* ((nodes-about (rec-search :to topic :link-type :about))
+           (triggers (node-match :label :trigger
+                                 :properties `(:text ,input)
+                                 :nodes nodes-about))
+           (response-links  (link-search :from nodes-about :link-type :responds))
+           (topic-text (get-prop topic :text))
+           (topics (link-search :from topic :link-type :includes)))
+      (if triggers
+          (mapcar #'(lambda (link) (cons (from-node link)
+                                         (get-prop link :weight)))
+                  (link-search :to triggers :link-type :responds
+                               :link-list response-links))
+          (if (or (member topic-text hist) (> (1+ depth) *depth*))
+              nil
+              (when topics
+                (loop
+                   for i from 1 upto (length topics)
+                   for responses = (get-answers input
+                                                (included-topic i topics)
+                                                (1+ depth) (cons topic-text hist))
+                   when responses
+                   return responses))))))
+
+#+END_SRC
+
+It looks kind of long, and we had to define an additional function, the additional function looks for the links which matches the =:order= property in the list of links to included topics (/topics/), the function that creates the "includes" links between topics always assigns a number, to make sure they are searched in order, which is how the working draft indicates that these things should be processed. The else clause changed quite a bit, if it finds that the topic is already in the history or that the maximum depth is reached, then it returns nil, otherwise it goes through each subtopic in the list in order, and stops when either there are responses or there are no more topics. Notice how ~get-answers~ now calls itself, so this process will be repeated in each included topic, making it depth first. One consequence of this modification is that the function will return an empty list (=nil=) if no answers are found, this means we have to change the code that calls this function to choose the default reply if no responses are found.
+
+#+BEGIN_SRC lisp :exports code
+(defun main (directory)
+  "Receives a brain directory and processes all .rive files"
+  (read-line)
+  (walk-directory directory #'read-doc :test #'rivescript-doc-p)
+  (loop for input = (progn
+		      (format t "~&> ")
+		      (force-output)
+		      (get-input))
+     until (string= "bye" (car input))
+     do (format t "~a~%" (select-response (or (get-answers input)
+					      (list (cons *default-answer* 1)))))))
+
+#+END_SRC
+
+Those two changes should do the trick, we will add a new topic in order to test, we will add it before the previous topic in our =example.brain= file, the order should not matter to the interpreter but it matters to me, we also need to add a way to get into the topic.
+
+#+BEGIN_EXAMPLE
+  > topic superpowers includes superman
+
+    + is he strong
+    - One of the strongest superhumans!!
+    - Phisically yes, very
+
+    + is he fast
+    - Faster than a speeding bullet, or so they say
+    - He's challenged even the flash
+
+    + enough about superman
+    - I agree, let's move to another subject {topic=random}
+
+  < topic
+
+  > topic superman
+
+    + what is his weakness
+    - Louis Lane, I'm kidding is Kryptonite
+    - I don't know if I should tell you {weight=9}
+
+    + do you know his superpowers
+    - Ask me, I'll see if I can tell you {topic=superpowers}
+
+    + enough about superman
+    - Ok, if that is what you want {topic=random}
+
+  < topic
+
+#+END_EXAMPLE
+
+In this case the example is stupid but it should be enough to test, lets have a conversation with our bot.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "./testbrain")
+
+  > Hello bot!
+  Hello, human!
+  > I want to talk about Superman
+  That is a topic I know little about
+  > Do you know his weakness?
+  I do not understand
+  > I want to talk about Superman
+  That is a topic I know little about
+  > What is his weakness?
+  Louis Lane, I'm kidding is Kryptonite
+  > Do you know his superpowers?
+  Ask me, I'll see if I can tell you
+  > Is he strong?
+  One of the strongest superhumans!!
+  > What is his weakness?
+  I don't know if I should tell you
+  > Enough about Superman
+  Ok, if that is what you want
+  > tell me a poem
+  Little Miss Muffit sat on her tuffet
+  in a nonchalant sort of way.
+  With her forcefield around her,
+  the Spider, the bounder,
+  Is not in the picture today.
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+Everything seemed OK until I said "Enough about Superman", there is a trigger in the =superpwoers= topic which should match and be used instead of the one in the =superman= topic. I tried another little conversation in order to debug. Here is the transcript.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "./testbrain")
+
+  > Hello bot!
+  Hello, human!
+  > How are you?
+  I'm fine, thanks for asking!
+  > I want to talk about Superman
+  That is a topic I know little about
+  > Do you know his superpowers?
+  Ask me, I'll see if I can tell you
+  > Enough about Superman
+  I agree, let's move to another subject
+  > I want to talk about Superman
+  That is a topic I know little about
+  > Do you know his superpowers?
+  Ask me, I'll see if I can tell you
+  > Is he fast?
+  He's challenged even the flash
+  > What is his weakness?
+  I don't know if I should tell you
+  > Enough about Superman
+  Ok, if that is what you want
+  > Is he strong?
+  I do not understand
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+In this conversation we see that the first time we say "Enough about Superman" it does reply with the expected response from the =superpowers= topic, however the second time, after going to the =superpowers= subject and asking a question that had to be retrieved from one of the included topics ("What is his weakness?), when I say "Enough about Superman" I get the reply in the =superman= topic. It took me some time to find out what the problem was, and since it is not easy to find, and it requires more changes to the code I will explain the findings.
+
+It goes back to the definition of the "-" command.
+
+#+BEGIN_SRC lisp :exports code
+(def-rs-command #\- (string)
+  (with-curly-vars
+      ((weight "1")
+       (topic (get-prop *current-topic* :text)))
+    (let* ((text (clean-string (assigning-curly-vars vars string)))
+	   (resp (node-create :label :response))
+	   (lnk (link-create :responds resp *last-created-trigger*)))
+      (setf (get-prop resp :text) text)
+      (setf (get-prop resp :new-topic) topic)
+      (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+      (link-create :about resp *current-topic*)
+      (setf *last-created-response* resp)
+      text)))
+
+#+END_SRC
+
+When we assign the text for the =*current-topic*= as the default value for the =topic= curly variable, if there is no ~{topic=...}~ clause in the line, it still acts as if there was one, pointing to the active topic when the node is being defined, so when ~get-answers~ returns the node that belongs to the included topic, its =:new-topic= property is set to  =superman=.
+
+#+BEGIN_SRC lisp :exports both
+  (mapcar #'(lambda (node)
+              (list (get-prop (car node) :text)
+                    (get-prop (car node):new-topic)))
+          (get-answers '("what" "is" "his" "weakness") (switch-topic "superpowers")))
+
+#+END_SRC
+
+#+RESULTS:
+| I don't know if I should tell you     | superman |
+| Louis Lane, I'm kidding is Kryptonite | superman |
+
+This makes ~select-response~ switch topics, when it wasn't the intended behavior, the reason this breaks because inheritance makes the function look for answers in another topic. What we really want is that only responses that contain a ~{topic=...}~ tag explicitly will have a =:new-topic= property, and in ~select-response~ we can check if the property is present or not, before we attempt to change it.
+
+Let's make those changes.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\- (string)
+    (with-curly-vars
+        ((weight "1")
+         (topic nil))
+      (let* ((text (clean-string (assigning-curly-vars vars string)))
+             (resp (node-create :label :response))
+             (lnk (link-create :responds resp *last-created-trigger*)))
+        (setf (get-prop resp :text) text)
+        (when topic (setf (get-prop resp :new-topic) topic))
+        (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+        (link-create :about resp *current-topic*)
+        (setf *last-created-response* resp)
+        text)))
+
+  (defun select-response (list)
+    (when list
+      (let* ((response-node  (weighted-random list))
+             (text (get-prop response-node :text))
+             (new-topic (get-prop response-node :new-topic)))
+        (when new-topic
+          (setf *user-topic* (switch-topic new-topic :create nil)))
+        text)))
+
+#+END_SRC
+
+With these changes in place, the bot now switches topics only in nodes that explicitly ask for a topic change. This is a transcript of a conversation after the fixes.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "./testbrain")
+
+  > Hello bot!
+  Hello, human!
+  > I want to talk about Superman
+  That is a topic I know little about
+  > Is he strong?
+  I do not understand
+  > I want to talk about Superman
+  That is a topic I know little about
+  > Do you know his superpowers?
+  Ask me, I'll see if I can tell you
+  > Is he strong?
+  Phisically yes, very
+  > What is his weakness?
+  I don't know if I should tell you
+  > Enough about Superman
+  I agree, let's move to another subject
+  > bye
+
+  NIL
+  CL-RIVESCRIPT>
+#+END_EXAMPLE
+
+This worked OK, the first time I asked "Is he strong?" I was a bit eager, and asked about it before we were in the =superpowers= topic, when the bot goes to the default answer it forces the subject back to =random=, so I had to start over, the second time it replied correctly to the same question, so we know it is in the =superpowers= topic now, when I ask about Superman's weakness it retrieves it from the =superman= topic, which was included, but this time when I said "Enough about Superman" it replied with the reply in the =superpowers= topic. This brings out a point, I did have different replies on purpose, otherwise the error would have gone undetected. It might be suspicious that every time I asked about Superman it complied immediately, instead of choosing the other response, this was dumb luck, I tested the random selector and it is still working fine.
+
+#  LocalWords:  RiveScript

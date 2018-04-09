@@ -2,6 +2,9 @@
 
 (in-package #:cl-rivescript)
 
+(defvar *depth* 25
+  "Recursion limit before an attempt to fetch a reply will be abandoned.")
+
 (defvar *last-created-trigger* nil
   "A variable to contain the last trigger for easy linking")
 
@@ -55,12 +58,12 @@
 (def-rs-command #\- (string)
   (with-curly-vars
       ((weight "1")
-       (topic (get-prop *current-topic* :text)))
+       (topic nil))
     (let* ((text (clean-string (assigning-curly-vars vars string)))
 	   (resp (node-create :label :response))
 	   (lnk (link-create :responds resp *last-created-trigger*)))
       (setf (get-prop resp :text) text)
-      (setf (get-prop resp :new-topic) topic)
+      (when topic (setf (get-prop resp :new-topic) topic))
       (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
       (link-create :about resp *current-topic*)
       (setf *last-created-response* resp)
@@ -108,26 +111,43 @@
   (mapcar #'(lambda (word) (remove-if-not #'alphanumericp word))
 	  (split "\\s+" (string-downcase (read-line)))))
 
-(defun get-answers (input)
+(defun included-topic (order list)
+  "Receives an integer and a list of included topics,
+returns the node with the matching :order property"
+  (to-node (car (link-match :properties `(:order ,order) :links list))))
+
+(defun get-answers (input &optional (topic *user-topic*) (depth 1) hist)
   "Gets a list of words forming a phrase to see if it matches any trigger"
-  (let* ((nodes-about (rec-search :to *user-topic* :link-type :about))
-	 (triggers (node-match :label :trigger
-			       :properties `(:text ,input)
-			       :nodes nodes-about))
-	 (response-links  (link-search :from nodes-about :link-type :responds)))
+  (let* ((nodes-about (rec-search :to topic :link-type :about))
+         (triggers (node-match :label :trigger
+                               :properties `(:text ,input)
+                               :nodes nodes-about))
+         (response-links  (link-search :from nodes-about :link-type :responds))
+	 (topic-text (get-prop topic :text))
+	 (topics (link-search :from topic :link-type :includes)))
     (if triggers
-	(mapcar #'(lambda (link) (cons (from-node link)
-				       (get-prop link :weight)))
-		(link-search :to triggers :link-type :responds
-			     :link-list response-links))
-	(list (cons *default-answer* 1)))))
+        (mapcar #'(lambda (link) (cons (from-node link)
+                                       (get-prop link :weight)))
+                (link-search :to triggers :link-type :responds
+                             :link-list response-links))
+        (if (or (member topic-text hist) (> (1+ depth) *depth*))
+	    nil
+	    (when topics
+	      (loop
+		 for i from 1 upto (length topics)
+		 for responses = (get-answers input
+					      (included-topic i topics)
+					      (1+ depth) (cons topic-text hist))
+		 when responses
+		 return responses))))))
 
 (defun select-response (list)
   (when list
     (let* ((response-node  (weighted-random list))
 	   (text (get-prop response-node :text))
 	   (new-topic (get-prop response-node :new-topic)))
-      (setf *user-topic* (switch-topic new-topic :create nil))
+      (when new-topic
+	(setf *user-topic* (switch-topic new-topic :create nil)))
       text)))
 
 (defun main (directory)
@@ -139,5 +159,6 @@
 		      (force-output)
 		      (get-input))
      until (string= "bye" (car input))
-     do (format t "~a~%" (select-response (get-answers input)))))
+     do (format t "~a~%" (select-response (or (get-answers input)
+					      (list (cons *default-answer* 1)))))))
 
