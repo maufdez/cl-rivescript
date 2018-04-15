@@ -1,0 +1,311 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 10)
+
+* Note about topic inheritance and inclusion
+
+In the last post we finished implementing inheritance, and the algorithm was correct, however looking at the documentation and some example scripts, I realized that I got two concepts mixed, inheritance which basically is what we implemented, you look in your main topic, if you don't find a reply there then you look in the topics that the current one inherits, with recursion. Inclusion, on the other hand should behave as if a super-topic with all the replies from the included topics and those in the current topic. Right now with our limited bot inclusion and inheritance would likely behave the same, but once we implement [[https://www.rivescript.com/docs/tutorial#open-ended-triggers][open ended triggers]] the behavior will be different. To keep myself organized I will create a pending tasks document (pending.org), with things that I leave incomplete or incorrect, so I won't forget to come back to those later.
+
+* Implementing Definitions (!)
+
+** General Considerations
+
+  The definitions section in the tutorial is not very extensive, a lot more information is found in the working draft, we will work mainly from the latter. According to the documentation the syntax is.
+#+BEGIN_EXAMPLE
+! type name = value
+#+END_EXAMPLE
+
+However, the =version= variable does not have a type, I will make it a =global= variable, which is the first type, then we have =var=, =array=, =sub= and finally =person=. There is also a mention in the tutorial about a =local= type, which is a file scoped value, in the tutorial is used for the =concat= variable, which defines how to concatenate text from a continuation command (^).
+
+And speaking about the "^" command, this command is also used for defining arrays, so we will have to make some modifications to it.
+
+** Implementation
+
+I think that a simple way to achieve this is to use hash tables or association lists, the latter is more efficient when there are few elements, and I don't anticipate we'll have a ton of variables, however I will use hash tables because in this case is more convenient. What I want is to have a hash of hashes, where the first hash is indexed by type and the second is indexed by variable name. And to make things easier for me I will define a getter, a setter, and make the setter to be the setf of the getter.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *rs-vars* (make-hash-table :test 'equal)
+    "A variable to store the rivescript types")
+
+  (defun def-rs-type (type)
+    "Creates a has with the key of type to store variables of that type"
+    (setf (gethash type *rs-vars*)(make-hash-table :test 'equal)))
+
+  (defun rs-var (type name)
+    "getter for the rivescript variables"
+    (gethash name (gethash type *rs-vars*)))
+
+  (defun set-rs-var (type name value)
+    "Setter for the rivescript variables"
+    (setf (gethash name (gethash type *rs-vars*)) value))
+
+  (defsetf rs-var set-rs-var)
+
+#+END_SRC
+
+I am not doing a ton of checking, I am assuming that I know what I'm doing when I use these functions, but I should at least verify that the type has been previously declared, so only explicitly declared rs-types are valid. I will place these in the utilities file, and make the =rs-type= declarations in the main =cl-rivescript.lisp= file.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-type "global")
+  (def-rs-type "var")
+  (def-rs-type "array")
+  (def-rs-type "sub")
+  (def-rs.type "person")
+  (def-rs-type "local")
+
+#+END_SRC
+
+Now we have to define the "!" command, looking at the examples there are three different behaviors, "version" does not have a type, the "array" does split on spaces if there are no "|" characters and on space otherwise, and we should store a list. And the rest are just assign whatever is to the right of the "=" sign to the variable named to the left of it, in using the type following the "!" sign.
+
+We can reduce this to two cases by being clever with regular expressions. The following code will assign any variable with no type to the global type, which is not exactly right but we can handle that so only version is allowable like that.
+
+#+BEGIN_SRC lisp :exports code
+  (defun rs-tnv-split (string)
+    "Split the name and value"
+    (destructuring-bind (type name value)
+        (coerce (nth-value 1 (scan-to-strings "^!\\s+(\\w+)\\s+(.*?)\\s*=\\s*(.+)$" string)) 'list)
+      (if (string= name "")
+          (list "global" type value)
+          (list type name value))))
+
+#+END_SRC
+
+This is part of the solution but not all of it, we need to make provisions for the "array" case and make sure that only valid types are accepted. Let's define another function, to split the array, it will be used in the initial array assignment and in the continuations, as arrays can be defined over several lines.
+
+#+BEGIN_SRC lisp :exports code
+  (defun split-rs-array (string)
+    "Splits and cleans a rivescript array based on the presence of the | character"
+    (let ((separator (or (find #\| string :test #'string=) "s")))
+      (mapcar #'(lambda (s) (replace-tags (string-trim *spaces* s)))
+              (split  (format nil "\\~a+" separator) string))))
+
+#+END_SRC
+
+Notice how we use format to create the appropriate regular expression, we also clean each element of trailing and leading spaces, and replace any tags, in this case we only expect to have "\s", which will allow us to add spaces when the delimiter is the space character.
+
+With that we can finally write the definition command (!).
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\! (string)
+    (multiple-value-bind (result strings) (scan-to-strings "^\\s+(\\w+)" string)
+      (let ((type (elt strings 0)))
+        (when (and result (or (string= type "version")
+                              (gethash type *rs-vars*)))
+          (destructuring-bind (type name value)(rs-tnv-split string)
+            (setf (rs-var type name)(if (string= type "array")
+                                        (split-rs-array value)
+                                        value)))))))
+
+#+END_SRC
+
+This will only make a difference in the way arrays and all other things are processed, since an array is represented as a list in memory, while all other things will store a string. The ~when~ ensures that we only process the contents of the command if the type has been declared as a ~rs-type~ or if it is "version", any other cases will be ignored.
+
+This changes should be enough for reading the definitions in the =begin.rive= file, I should also add array examples for testing, I will add them in the =example.rive= file.
+
+#+BEGIN_EXAMPLE
+  ! array colors = red green blue cyan magenta yellow black white orange brown
+  ! array be     = is are was were
+  ! array whatis = what is|what are|what was|what were
+#+END_EXAMPLE
+
+Notice how I avoided continuation (^) commands after arrays for now, this has not been implemented. I did use the ~main~ to read the brain, and immediately used "bye" to get out of the chat and do some testing. Nothing in the bot is using variables just yet, so this is the best testing I can do right now.
+
+Let's check some variables to see that everything works as expected.
+
+#+BEGIN_SRC lisp :exports both
+  (list (list "version" (rs-var "global" "version"))
+        (list "name" (rs-var "var" "name"))
+        (list "i'd" (rs-var "sub" "i'd")))
+
+#+END_SRC
+
+#+RESULTS:
+| version | 2.0      |
+| name    | Tutorial |
+| i'd     | i would  |
+
+Cool that is what we expected, now let's read an array to see how that goes.
+
+#+BEGIN_SRC lisp :exports both
+  (list (rs-var "array" "colors")
+        (rs-var "array" "whatis"))
+
+#+END_SRC
+
+#+RESULTS:
+| red     | green    | blue     | cyan      | magenta | yellow | black | white | orange | brown |
+| what is | what are | what was | what were |         |        |       |       |        |       | 
+
+I selected =colors= and =whatis= because the delimiters are different in these two declarations. Both results are the expected, however our work is not done yet, we have to implement "^" for arrays, and according to the working draft the "<undef>" tag.
+
+#+BEGIN_QUOTE
+Setting a value to <undef> will undefine the variable (deleting it or uninitializing it, depending on the implementation).
+#+END_QUOTE
+
+The "<undef>" part seems to be easy enouogh, we can use =remhash= to remove keys, let's write a function for "un-defining" RiveScript variables
+
+#+BEGIN_SRC lisp :exports code
+  (defun undef-rs-var (type name)
+    "This function undefines a rivescript variable based on the type and name"
+    (remhash name (gethash type *rs-vars*)))
+
+#+END_SRC
+
+And with that we can modify the code in "!" to check if we are trying to remove the definition of a variable.
+
+#+BEGIN_SRC lisp :exports code
+  (def-rs-command #\! (string)
+    (let ((text (string-trim *spaces* string)))
+      (multiple-value-bind (result strings)(scan-to-strings "^!\\s+(\\w+)" text)
+        (let ((type (if result (elt strings 0) "")))
+          (when (and result (or (string= type "version")
+                                (gethash type *rs-vars*)))
+            (destructuring-bind (type name value)(rs-tnv-split text)
+              (if (string= value "<undef>")
+                  (undef-rs-var type name)
+                  (setf (rs-var type name)(if (string= type "array")
+                                              (split-rs-array value)
+                                              value)))))))))
+#+END_SRC
+
+As you can see an undef does not make any difference between arrays and regular variables, so we just stick it in the if and everything works fine.
+
+Now for modifying the behavior of "^", we need to understand if what came before was a "-" which we are already handling correctly, or a "!" which will need to store the /type/ and /name/ of the latest array defined, in order to keep appending to it.
+
+We add two global variables and handle them in the "-" and "!" command definitions.
+
+#+BEGIN_SRC lisp :exports code
+  (defvar *prev-rs-command* #\space
+    "It is set by commands that accept continuation")
+
+  (defvar *last-array-var* nil
+    "This variable stores the name of the last array that was accessed")
+
+  (def-rs-command #\- (string)
+    (prog1
+        (with-curly-vars
+            ((weight "1")
+             (topic nil))
+          (let* ((text (clean-string (assigning-curly-vars vars string)))
+                 (resp (node-create :label :response))
+                 (lnk (link-create :responds resp *last-created-trigger*)))
+            (setf (get-prop resp :text) text)
+            (when topic (setf (get-prop resp :new-topic) topic))
+            (setf (get-prop lnk :weight)(parse-integer weight :junk-allowed t))
+            (link-create :about resp *current-topic*)
+            (setf *last-created-response* resp)
+            text))
+      (setf *prev-rs-command* #\-)))
+
+  (def-rs-command #\! (string)
+    (prog1 
+        (let ((text (string-trim *spaces* string)))
+          (multiple-value-bind (result strings)(scan-to-strings "^!\\s+(\\w+)" text)
+            (let ((type (if result (elt strings 0) "")))
+              (when (and result (or (string= type "version")
+                                    (gethash type *rs-vars*)))
+                (destructuring-bind (type name value)(rs-tnv-split text)
+                  (if (string= value "<undef>")
+                      (undef-rs-var type name)
+                      (setf (rs-var type name)(if (string= type "array")
+                                                  (progn
+                                                    (setf *last-array-var* name)
+                                                    (split-rs-array value))
+                                                  value))))))))
+      (setf *prev-rs-command* #\!)))
+
+#+END_SRC
+
+In the "-" command we just added a ~prog1~ with a setf for the previous RiveScript command, the ~setf~ is executed at the end but the previous code's output is maintained, a similar thing was done in the "!" command code, but there is a new ~progn~ when the variable is an array, to store the name of the array.
+
+The previous code that we had on the "^" command, will be moved to a ~continue-response~ function, we will write a new ~continue-array~ function, and then just rewrite the "^" command code to select the appropriate function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun continue-response (string)
+    "Function to continue a multi-line response definition"
+    (let ((current-text (get-prop *last-created-response* :text))
+          (new-text (clean-string string)))
+      (setf (get-prop *last-created-response* :text)
+            (replace-tags (format nil "~a~a" current-text new-text)))))
+
+  (defun continue-array (string)
+    "Function to continua a multi-line array definition"
+    (let ((text (clean-string string))
+          (original-array (copy-seq (rs-var "array" *last-array-var*))))
+      (setf (rs-var "array" *last-array-var*) (append original-array (split-rs-array text)))))
+
+  (def-rs-command #\^ (string)
+    (case *prev-rs-command*
+      (#\- (continue-response string))
+      (#\! (continue-array string))
+      (otherwise nil)))
+
+#+END_SRC
+
+To test this I will change the definition of the /colors/ array in the =example.rive= file to use multiple lines.
+
+#+BEGIN_EXAMPLE
+  ! array colors = red green blue cyan magenta yellow
+  ^ light red|light green|light blue|light cyan|light magenta|light yellow
+  ^ dark red|dark green|dark blue|dark cyan|dark magenta|dark yellow
+  ^ white orange teal brown pink
+  ^ dark white|dark orange|dark teal|dark brown|dark pink
+
+#+END_EXAMPLE
+
+Going through the same process of reading the brain by running the main function we get the following short transcript.
+
+#+BEGIN_EXAMPLE
+  CL-RIVESCRIPT> (main "./testbrain")
+
+  > tell me a poem
+  Little Miss Muffit sat on her tuffet
+  in a nonchalant sort of way.
+  With her forcefield around her,
+  the Spider, the bounder,
+  Is not in the picture today.
+  > bye
+
+  NIL
+#+END_EXAMPLE
+
+Which demonstrates that continue is still working for the "-" command, and after the "bye" we execute the code below and the response shows us that also the arrays are continued correctly, and with that we accomplish what we wanted for this post.
+
+#+BEGIN_SRC lisp :exports both
+  (loop for i from 1 for color in (rs-var "array" "colors") collect (list i color))
+
+#+END_SRC
+
+#+RESULTS:
+|  1 | red           |
+|  2 | green         |
+|  3 | blue          |
+|  4 | cyan          |
+|  5 | magenta       |
+|  6 | yellow        |
+|  7 | light red     |
+|  8 | light green   |
+|  9 | light blue    |
+| 10 | light cyan    |
+| 11 | light magenta |
+| 12 | light yellow  |
+| 13 | dark red      |
+| 14 | dark green    |
+| 15 | dark blue     |
+| 16 | dark cyan     |
+| 17 | dark magenta  |
+| 18 | dark yellow   |
+| 19 | white         |
+| 20 | orange        |
+| 21 | teal          |
+| 22 | brown         |
+| 23 | pink          |
+| 24 | dark white    |
+| 25 | dark orange   |
+| 26 | dark teal     |
+| 27 | dark brown    |
+| 28 | dark pink     |
+
+#  LocalWords:  setf

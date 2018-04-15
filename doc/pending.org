@@ -1,0 +1,21 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: CL-Rivescript Pending Tasks
+
+* TODO Implement Topic Inclusion and fix Topic Inheritance
+The =includes= keyword in the label is used for inheritance, and proper inclusion is not implemented.
+
+* TODO Implement other curly syntax variables
+Only straight curly variables are implemented, the working draft has other uses for the curly braces.
+
+* TODO Implement other label functions
+Currently only ~topic~ is defined, we have to define ~begin~ and ~object~ at some point.
+
+* TODO Make sure the labels only run the intended functions
+The way labels are implemented make it possible to use keywords which are not in the working draft, and possibly execute unintended code.
+
+* TODO Perform type checking on rivescript variable setter and getter
+This is likely not going to be critical during development, but the interpreter should accept only types defined in the working draft.
+

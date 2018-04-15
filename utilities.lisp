@@ -2,6 +2,8 @@
 
 (in-package #:cl-rivescript)
 
+;;; Variables
+
 (defparameter *ignore* nil
   "A boolean to ignore multiline comments")
 
@@ -10,9 +12,16 @@
 
 (defvar *spaces* '(#\space #\tab #\return))
 
+(defvar *rs-vars* (make-hash-table :test 'equal)
+  "A variable to store the rivescript types")
+
+(defvar *rivescript-commands* ()
+  "This is an alist containing the commands and associated functions")
+
 (defvar *exit-label* nil
   "Meant to contain a closure that maintains the open label environment")
 
+;;; Utility functions
 (defun exit-label ()
   "Function to more clearly execute the exit-label closure"
   (when (functionp *exit-label*)
@@ -41,9 +50,6 @@
 		(regex-replace-all "\\\\/" (string-right-trim *spaces* (subseq line 0 (1- slashpos))) "/")
 		fixedline))
 	fixedline)))
-
-(defvar *rivescript-commands* ()
-  "This is an alist containing the commands and associated functions")
 
 (defmacro def-rs-command (char lambdalist &body body)
   (let ((f (gensym)))
@@ -117,6 +123,42 @@ the file has the given extension"
 (defun get-captured-text (&optional (text-capturer *label-capture*))
   (funcall (nth 1 text-capturer)))
 
+
+(defun def-rs-type (type)
+  "Creates a has with the key of type to store variables of that type"
+  (setf (gethash type *rs-vars*)(make-hash-table :test 'equal)))
+
+(defun rs-var (type name)
+  "getter for the rivescript variables"
+  (gethash name (gethash type *rs-vars*)))
+
+;;; RS Varaiable utilities
+(defun set-rs-var (type name value)
+  "Setter for the rivescript variables"
+  (setf (gethash name (gethash type *rs-vars*)) value))
+
+(defsetf rs-var set-rs-var)
+
+(defun rs-tnv-split (string)
+  "Split the name and value"
+  (destructuring-bind (type name value)
+      (coerce (nth-value 1 (scan-to-strings "^!\\s+(\\w+)\\s+(.*?)\\s*=\\s*(.+)$" string)) 'list)
+    (if (string= name "")
+	(list "global" type value)
+	(list type name value))))
+
+(defun split-rs-array (string)
+  "Splits and cleans a rivescript array based on the presence of the | character"
+  (let ((separator (or (find #\| string :test #'string=) "s")))
+    (mapcar #'(lambda (s) (replace-tags (string-trim *spaces* s)))
+	    (split  (format nil "\\~a+" separator) string))))
+
+(defun undef-rs-var (type name)
+  "This function undefines a rivescript variable based on the type and name"
+  (remhash name (gethash type *rs-vars*)))
+;;; End of type variable code
+
+;; Evaluator
 (defun do-command (line)
   "Call the appropriate function to process the current line"
   (let* ((cmd-char (first-nonspace-char line))
