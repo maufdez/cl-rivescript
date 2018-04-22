@@ -1,0 +1,232 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-Rivescript Interpreter (Part 11)
+
+* Implementing open ended triggers
+
+What RiveScript calls open ended triggers is actually very much related to pattern matching, so far with our current implementation the brain has to have a perfect match to a trigger to find a response, this is inefficient in the sense that a brain should contain a lot of triggers in order to contain all possible combinations, and inflexible, in the sense that every trigger should be static. I will reproduce some of the first examples in the tutorial to further clarify this points. 
+
+#+BEGIN_EXAMPLE
+  + my name is *
+  - Nice to meet you, <star1>!
+
+  + * told me to say *
+  - Why would <star1> tell you to say "<star2>"?
+  - Did you say "<star2>" after <star1> told you to?
+
+  + i am * years old
+  - A lot of people are <star1> years old.
+#+END_EXAMPLE 
+
+If we did not have the "*" wildcard the brain would require to have a long list of triggers with different names if we want it to be available to a large number of users, once you provide your name to the bot it would be able to reply with "Nice to meet you John" only if a trigger "+ my name is John" existed, and the name would be hard coded and unavailable in the future, however with the "*", which would stand for anything, the value gets captured on a temporary =star1= variable that, as you can see can be used later with the tag =<star1>=, the information could even be stored to a user variable so the bot knows what the your name is, in case it needs it, this will be explored later.
+
+In the post we will create the functions needed for matching the different types of open ended behaviors in the triggers, that is, wildcards, alternations, arrays (which are also alternations), and optionals. After that we have to take our ~get-answers~ function and modify it to take advantage of the changes that will allow to read these.
+
+** Implementing wildcards
+
+We will start with the "*" wildcard, according to the working draft.
+
+#+BEGIN_QUOTE
+An asterisk (*) will match any character (numbers and letters). If you want to only match numbers, use #, and to match only letters use _.
+#+END_QUOTE
+
+However looking at the examples, the "*" can match one or more words, that is why the "catch all" trigger is "+ *", so what we want to match is one or more contiguous groups of alphanumeric characters. I could write a pattern matcher, but since I am importing =cl-ppcre= I will use its power instead.
+
+This is the code I wrote to match a processed input to a trigger which may contain any of the "*", "#" and/or "_" wildcards.
+
+#+BEGIN_SRC lisp :exports code
+  (defun convert-wildcard (string)
+    "Converts wildcards to equivalent regular expressions"
+    (case (char string 0)
+      (#\* "(.+)")
+      (#\_ "([a-z]+?)")
+      (#\# "(\\d+?)")
+      (otherwise string)))
+
+  (defun to-regex (pattern)
+    "converts a match pattern to a regular expression"
+    (format nil "~{~a~^ ~}" (mapcar #'convert-wildcard pattern)))
+
+  (defun match-with-pattern (pattern input)
+    "Uses regular expressions to match *, _ and # wildcards"
+    (scan-to-strings (to-regex pattern) (format nil "~{~a~^ ~}" input)))
+
+#+END_SRC
+
+The ~match-with-pattern~ function takes the pattern as a list of words and wildcards, and converts it to a regular expression, using the ~to-regex~ function, which basically uses the substitution rules defined in ~convert-wildcard~. Let's test this to check that everything works as expected.
+
+Let's write a function to capture the results from the RiveScript /star/ list in a way that =org-mode= will show it as a table when executed and exported, this function won't be part of the program but will be useful to show stuff in the rest of the post.
+
+#+BEGIN_SRC lisp :exports both
+  (defun star-to-org-table (pattern input)
+    "Outputs the array of results to be shown as an org table"
+    (loop for i from 1
+       for star across
+         (nth-value 1 (match-with-pattern pattern input))
+       collect (list (format nil "star~a" i) star)))
+
+  (star-to-org-table '("there" "are" "#" "_" "in" "*")
+                     '("there" "are" "8" "cats" "in" "a" "basket"))
+                     
+#+END_SRC
+
+#+RESULTS:
+| star1 | 8        |
+| star2 | cats     |
+| star3 | a basket |
+
+That worked OK let's try another example to be in the safe side, just because "*" is greedy.
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("*" "slept" "for" "a" "long" "time")
+                     '("rip" "van" "winkle" "slept" "for" "a" "long" "time"))
+    
+#+END_SRC
+
+#+RESULTS:
+| star1 | rip van winkle |
+
+Everything seems to be working fine.
+
+** Implementing alternations (...)
+The code we implemented above has one unexpected benefit, simple alternations work out of the box too, alternations are basically lists of things that might go in that place in the phrase, for example "+ i (am|was) an engineer" should match both "I am an Engineer" and "I was an Engineer", and it should capture "was" or "is" in the =star1= variable. 
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("i" "(am|was)" "an" "engineer")
+                     '("i" "am" "an" "engineer"))
+
+#+END_SRC
+
+#+RESULTS:
+| star1 | am |
+
+The list could also be stored in a variable and the alternation will take the form "(@colors)", where colors is an array variable containing the list of valid colors. replacing "@colors" with the values of the array variable "colors" separated using "|" should take care of that.
+
+#+BEGIN_SRC lisp :exports code
+  (defun expand-array (string)
+    "Expands a string like (@arrayname)"
+    (multiple-value-bind (match-p captured) (scan-to-strings "\\(@(\\w+)\\)" string)
+      (if match-p
+          (format nil "(~{~a~^|~})" (rs-var "array" (elt captured 0)))
+          string)))
+
+  (defun convert-wildcard (string)
+    "Converts wildcards to equivalent regular expressions"
+    (case (char string 0)
+      (#\* "(.+)")
+      (#\_ "([a-z]+?)")
+      (#\# "(\\d+?)")
+      (#\( (expand-array string))
+      (otherwise string)))
+
+#+END_SRC
+
+With this new modification we can use the =whatis= array to form a flexible pattern.
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("(@whatis)" "*")
+                     '("what" "is" "a" "palindrom"))
+#+END_SRC
+
+#+RESULTS:
+| star1 | what is     |
+| star2 | a palindrom |
+
+Or with the same pattern we could ask
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("(@whatis)" "*")
+                     '("what" "are" "those" "things"))
+#+END_SRC
+
+#+RESULTS:
+| star1 | what are     |
+| star2 | those things | 
+
+The /whatis/ variable is in =doc/example.rive=, it is defined like this.
+
+#+BEGIN_EXAMPLE
+  ! array whatis = what is|what are|what was|what were
+
+#+END_EXAMPLE
+
+So again I got the expected results, the array variable name is replaced by it's components and the list is used for the matching, I got "what is" in the first example and "what are" in the second.
+
+** Implementing Optionals [...]
+
+Optionals, according to the working draft, are words that may or may not be there, and do not get captured in any of the =starN= variables, is like having two versions of the trigger, one with the word and one without it, the first example in the draft is.
+
+#+BEGIN_EXAMPLE
+  + what is your [home] phone number
+#+END_EXAMPLE
+
+Which will match "what is your phone number" and "what is your home phone number", we can substitute "[word]" by "(\sword\s|\s)" in the final regexp, and that would work for matching, but the word or a space would be captured, any spaces between the optional word and the previous and following words should be removed too, because we need to match the word separated by spaces or a space. As an example.
+
+#+BEGIN_SRC lisp ::expors both
+  (let ((*string* "hello you idiot"))
+    (multiple-value-list (scan-to-strings "hello(\\syou\\s|\\s)idiot" *string*)))
+#+END_SRC
+
+#+RESULTS:
+| hello you idiot | ( you ) |
+
+Will work for "hello idiot" and "hello you idiot" (last case shown), but no other word but "you" can go in the place of the optional word, however as you can see the word "you" would be captured, so if we go with this approach we should drop that captured text from the list of /star/ results.
+
+This is the new code.
+
+#+BEGIN_SRC lisp :exports code
+  (defun wildcard-indexes (pattern)
+    "gets a list of inexes ignoring the optionals"
+    (flet ((wc-p (string)(member (char string 0) '(#\* #\# #\_ #\( #\[))))
+      (let ((wc-list (remove-if-not #'wc-p pattern)))
+        (loop for i from 0 for s in wc-list if (char/= (char s 0) #\[) collect i))))
+   
+  (defun replace-optionals (string)
+    "Replaces an rs optional word with the regex equivalent"
+    (regex-replace-all
+     "\\]\\s" 
+     (regex-replace-all "\\s\\[" (concatenate 'string "^ " string " $") "(\\s") "\\s|\\s)"))
+
+  (defun to-regex (pattern)
+    "converts a match pattern to a regular expression"
+    (replace-optionals (format nil "~{~a~^ ~}" (mapcar #'convert-wildcard pattern))))
+
+  (defun match-with-pattern (pattern input)
+    "Uses regular expressions to match *, _ and # wildcards"
+    (let ((wc-idxs (wildcard-indexes pattern)))
+      (multiple-value-bind (match-p all-results) (scan-to-strings (to-regex pattern) (format nil " ~{~a~^ ~} " input))
+        (when match-p
+          (values (string-trim *spaces* match-p)
+                  (coerce (loop for i in wc-idxs collect (elt all-results i)) 'vector))))))
+
+#+END_SRC
+
+You will notice that we added a space at the beginning and one at the end of both the pattern and the string formed from /input/, this helps to have a single case for the optional word substitution. We also added a "^" and a "$" to the pattern, to make sure we are not matching substrings.
+
+The ~wildcard-indexes~ function returns the indexes of the wildcards but not those of the optionals, and that way we can form a list with just the text captured by the wildcards and alternations, which is what the working draft wants, that list is coerced into a vector, to have the outputs be compatible with the previous incarnation of the ~match-with-pattern~ function.
+
+I tried various examples including with more than one optional, with and without wildcards, with the optional at the beginning and at the end. I will reproduce an example.
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("*" "is" "my" "[first]" "name") '("bruce" "is" "my" "name"))
+#+END_SRC
+
+#+RESULTS:
+| star1 | bruce | 
+
+And the same with the optional word in the input.
+
+#+BEGIN_SRC lisp :exports both
+  (star-to-org-table '("*" "is" "my" "[first]" "name") '("bruce" "is" "my" "first" "name"))
+#+END_SRC
+
+#+RESULTS:
+| star1 | bruce |
+
+And with that finally we have a single function ~match-with-pattern~ which will work for wildcards "*","#" and "_", alternations (in line and referencing an array) and finally optionals, in any combination.
+
+In the next post we will make changes to ~get-answers~ to use this, and to properly implement inclusion and inheritance, and hopefully make the code more modular and readable.
+
+#  LocalWords:  RiveScript wildcard wildcards

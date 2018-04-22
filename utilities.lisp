@@ -158,6 +158,49 @@ the file has the given extension"
   (remhash name (gethash type *rs-vars*)))
 ;;; End of type variable code
 
+;;; Wildcard processing functions
+(defun expand-array (string)
+  "Expands a string like (@arrayname)"
+  (multiple-value-bind (match-p captured) (scan-to-strings "\\(@(\\w+)\\)" string)
+    (if match-p
+        (format nil "(~{~a~^|~})" (rs-var "array" (elt captured 0)))
+        string)))
+
+(defun convert-wildcard (string)
+  "Converts wildcards to equivalent regular expressions"
+  (case (char string 0)
+    (#\* "(.+)")
+    (#\_ "([a-z]+?)")
+    (#\# "(\\d+?)")
+    (#\( (expand-array string))
+    (otherwise string)))
+
+(defun wildcard-indexes (pattern)
+  "gets a list of inexes ignoring the optionals"
+  (flet ((wc-p (string)(member (char string 0) '(#\* #\# #\_ #\( #\[))))
+    (let ((wc-list (remove-if-not #'wc-p pattern)))
+      (loop for i from 0 for s in wc-list if (char/= (char s 0) #\[) collect i))))
+ 
+(defun replace-optionals (string)
+  "Replaces an rs optional word with the regex equivalent"
+  (regex-replace-all
+   "\\]\\s" 
+   (regex-replace-all "\\s\\[" (concatenate 'string "^ " string " $") "(\\s") "\\s|\\s)"))
+
+(defun to-regex (pattern)
+  "converts a match pattern to a regular expression"
+  (replace-optionals (format nil "~{~a~^ ~}" (mapcar #'convert-wildcard pattern))))
+
+(defun match-with-pattern (pattern input)
+  "Uses regular expressions to match *, _ and # wildcards"
+  (let ((wc-idxs (wildcard-indexes pattern)))
+    (multiple-value-bind (match-p all-results) (scan-to-strings (to-regex pattern) (format nil " ~{~a~^ ~} " input))
+      (when match-p
+	(values (string-trim *spaces* match-p)
+		(coerce (loop for i in wc-idxs collect (elt all-results i)) 'vector))))))
+
+;;; end of wilcard processing section
+
 ;; Evaluator
 (defun do-command (line)
   "Call the appropriate function to process the current line"

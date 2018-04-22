@@ -19,3 +19,5 @@ The way labels are implemented make it possible to use keywords which are not in
 * TODO Perform type checking on rivescript variable setter and getter
 This is likely not going to be critical during development, but the interpreter should accept only types defined in the working draft.
 
+* TODO Properly implement Inclusion and Inheritance of Topics with wildcards, alternations and optionals
+The ~get-answers~ function is correct for simple matching, but with wildcards the inclusion and inheritance behave differently and both behaviors need to be implemented.
