@@ -181,6 +181,21 @@
 returns the node with the matching :order property"
   (to-node (car (link-match :properties `(:order ,order) :links list))))
 
+(defun top-level-triggers (trigger-matches)
+  "Receives a list of trigger-matches, and returns
+the ones that correspond to the top level sorting"
+  (let ((atomic (has-no-stars trigger-matches))) ;Get the subset of atomic triggers
+    (or (remove-if #'has-conditionals atomic :key #'car) ;Subset of atomic triggers with no optionals
+	(remove-if-not #'has-conditionals atomic :key #'car) ;Subset of atomic triggers with optionals
+	trigger-matches))) ;If you get to this point just return all
+
+(defun longest-wordcount (trigger-matches)
+  "Receives a list of trigger matches and keeps only the longest
+by wordcount"
+  (let* ((sorted (sort trigger-matches #'trigger-text-wordcont>))
+	 (max-len (non-wc-words (first sorted))))
+    (loop for tm in sorted while (= max-len (non-wc-words tm)) collect tm)))
+
 (defun get-answers (input &optional (topic *user-topic*) (depth 1) hist)
   "Gets a list of words forming a phrase to see if it matches any trigger"
   (let* ((nodes-about (rec-search :to topic :link-type :about))
@@ -215,11 +230,15 @@ returns the node with the matching :order property"
 	(setf *user-topic* (switch-topic new-topic :create nil)))
       text)))
 
+(defun read-brain (directory)
+  "Receives a brain dierectory and processes all .rive files"
+    (walk-directory directory #'read-doc :test #'rivescript-doc-p))
+
 ;;; Entry points
 (defun main (directory)
   "Receives a brain directory and processes all .rive files"
   (read-line)
-  (walk-directory directory #'read-doc :test #'rivescript-doc-p)
+  (read-brain directory)
   (loop for input = (progn
 		      (format t "~&> ")
 		      (force-output)

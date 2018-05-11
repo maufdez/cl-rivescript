@@ -1,0 +1,271 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-RiveScript Interpreter (Part 12)
+
+* Using the new matching function
+
+I took a little breather from this project, because I needed to focus on some other stuff, but I think that I need to finish what I started, and it seems I have some readers that presumably would like to see this completed.
+
+In the last post, we created some functions to be able to match triggers containing wildcards, alternations and optionals, however we did not integrate them, so if you run the interpreter with a brain with open ended filters it will not find those triggers.
+
+** General considerations
+
+In the past when I looked for a matching trigger there would be only one, or at least I expected to find only one. With open ended triggers several triggers could match when the user types something. From all of the matching triggers the interpreter hast to choose one, and to decide which one the working draft defines [[https://www.rivescript.com/wd/RiveScript#Sorting-Triggers][sorting rules]], we will have to implement a sorter that follows these rules.
+
+Another consideration is that when I implemented inheritance I made a mess because I was confused between inheritance and inclusion, so we need to implement inclusion and fix the mess.
+
+** The plan
+
+1. Write a function that receives a list of topics and returns a list of triggers belonging to those topics.
+2. Write a function that gets a list of triggers, and returns a list of matching triggers, using ~match-with-pattern~.
+3. Write a function that sorts the matched triggers according to the rules in the RiveScript working draft.
+4. Fix the "inherits/includes" situation.
+6. Write code to replace =<starN>= tags in the responses according to any captured text. 
+5. Put it all together.
+
+As always, I will try to make the interpreter very permissive. I will have to implement warnings in the future so the "brain developer" knows he is not using the correct syntax, and probably have some error handling. For now let's suppose the programmer knows what he is doing.
+
+** Isolating the read brain function
+
+I should have done this a lot earlier, but one problem I am having when doing tests is that I combined the function to read the brain with the chat loop, this forces me to run the main function, then quit by saying bye and then I can evaluate based on any existing data structures created during the brain read. This is a minor inconvenience but factoring out the read brain is the right thing to do, that way I can call that function and have the brain in memory without calling the loop. These are the changes I made.
+
+#+BEGIN_SRC lisp :exports code
+  (defun read-brain (directory)
+    "Receives a brain dierectory and processes all .rive files"
+      (walk-directory directory #'read-doc :test #'rivescript-doc-p))
+
+  (defun main (directory)
+    "Receives a brain directory and processes all .rive files"
+    (read-line)
+    (read-brain directory)
+    (loop for input = (progn
+                        (format t "~&> ")
+                        (force-output)
+                        (get-input))
+       until (string= "bye" (car input))
+       do (format t "~a~%" (select-response (or (get-answers input)
+                                                (list (cons *default-answer* 1)))))))
+
+#+END_SRC
+
+** Getting the list of "on topic" triggers
+
+This should be pretty straight forward, we were already doing it inside the ~get-answers~ code, but we want to be more modular this time. For inclusion the current topic should be included in the list of topics we are going to search.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-included-topics (topic)
+    "Receives a topic and returns a list of it and all included topics"
+    (cons topic (rec-search :from topic :link-type :includes)))
+
+  (defun on-topic-triggers (topic-list)
+    "Receives a list of topic nodes and retrieves all triggers related to them"
+    (node-match :label :trigger :nodes (rec-search :to topic-list :link-type :about)))
+
+#+END_SRC
+
+The first function receives a topic to be searched, it must be the topic node not the text of the topic, the current topic then forms a list with the results of the proto-graph query, which is pretty straight forward. I have not discussed the proto-graph API, but rec-search is meant to look for relations but it returns nodes. The ~on-topic-triggers~ function takes advantage of the fact that ~rec-search~ is able to receive both single nodes or list of nodes, we are planning on giving it a list of nodes by composing these two functions, once the ~rec-search~ gives us all of the nodes that are tied to the topics with a link of type =:about=, we use ~node-match~ to find those that are triggers (have label of trigger).
+
+This is a test to show how this works.
+#+BEGIN_SRC lisp :exports both
+  (on-topic-triggers (get-included-topics (switch-topic "superpowers")))
+#+END_SRC
+
+#+RESULTS:
+: (#<PROTO-GRAPH::NODE ID: 23 |TEXT: (enough about superman) >
+:  #<PROTO-GRAPH::NODE ID: 20 |TEXT: (is he fast) >
+:  #<PROTO-GRAPH::NODE ID: 17 |TEXT: (is he strong) >
+:  #<PROTO-GRAPH::NODE ID: 31 |TEXT: (enough about superman) >
+:  #<PROTO-GRAPH::NODE ID: 29 |TEXT: (do you know his superpowers) >
+:  #<PROTO-GRAPH::NODE ID: 26 |TEXT: (what is his weakness) >)
+
+It might seem like "enough about superman" is repeated, but one is node 23 and the other one is node 31 (Looking at the ID here), which indicates that these are two different nodes with the same =TEXT= property, one of them is the one on the topic =superman=, and the other the one in the topic =superpowers=, so far everything working as expected.
+
+** Constraining the list to the triggers matching the input
+
+I was not sufficiently smart when I designed proto-graph to make it extensible. When you query properties these are compared using ~equal~, that is why it was working out of the box before, but now that we need to use a different comparison operation we have to write a function to narrow the search by hand. The good thing is that the query results are lists, and Lisp is already very good at handling lists. The ~match-with-pattern~ function is built to behave as ~scan-to-strings~ in the =cl-ppcre= library, it returns nil when it does not match and has multiple values when it does, the first being the matched text and the second a one dimensional array of the "starN" variables. We could use ~remove-if-not~ but then we would loose the captured text, and we would have to get it again, the captured text also allows us to understand quickly if the trigger is atomic or not, and when it is not, how many words long is the trigger without wildcards. 
+
+The following function will return a list of conses, with the =car= being the trigger, and the =cdr= the vector of matched results. It is a recursive function that goes through all the list consing only the triggers that match the input.
+
+#+BEGIN_SRC lisp :exports code
+  (defun matching-input (trigger-list input)
+    "Recursive function to form a list of matched triggers and captured text"
+    (when (car trigger-list)
+      (multiple-value-bind (matched captured)
+          (match-with-input (get-prop (car trigger-list) :text) input)
+        (if matched (cons (cons (car trigger-list) captured)
+                          (matching-input (cdr trigger-list) input))
+            (matching-input (cdr trigger-list) input)))))
+
+#+END_SRC
+
+We could test this with our current brain, following the previous example to see if it is working, but it is easier and better to temporarily add some triggers to the =random= topic just to have some variety of cases.
+
+#+BEGIN_SRC lisp :exports code
+  (setf *current-topic* *default-topic*)
+  (do-command "+ (what|who) is *")
+  (do-command "- I don't know <star1> <star2> is")
+  (do-command "- How am I supposed to know")
+
+  (do-command "+ who is _")
+  (do-command "- I suppose <star1> is someone")
+  (do-command "- <star1>... beats ne!")
+
+  (do-command "+ who is superman")
+  (do-command "- He is an alien, from planet Krypton")
+  (do-command "- He is an acquaintance of the superhero Batman")
+
+  (do-command "+ who is [the] joker")
+  (do-command "- He is a clown, the scariest of them all") 
+
+  (do-command "+ *")
+  (do-command "- I'm sorry, I don't understand")
+#+END_SRC
+
+#+RESULTS:
+: I'm sorry, I don't understand
+
+That should be enough, If I ask "Who is Superman?" it should match all of these, except for "+ who is [the] joker".
+
+#+BEGIN_SRC lisp :exports both
+  (matching-input
+   (on-topic-triggers (get-included-topics *default-topic*))
+   '("who" "is" "superman"))
+#+END_SRC
+
+#+RESULTS:
+: ((#<PROTO-GRAPH::NODE ID: 47 |TEXT: (*) > . #("who is superman"))
+:  (#<PROTO-GRAPH::NODE ID: 42 |TEXT: (who is superman) > . #())
+:  (#<PROTO-GRAPH::NODE ID: 39 |TEXT: (who is _) > . #("superman"))
+:  (#<PROTO-GRAPH::NODE ID: 36 |TEXT: ((what|who) is *) > . #("who" "superman")))
+
+Cool, this works as expected, the first element is the catch all trigger, the second is the atomic trigger "+ who is superman", the vector of captured text is empty because it is atomic, the third is capturing one "star" and the last one two. The order is not guaranteed, and that is what we will do next.
+
+** Sorting the matched triggers according to the sorting rules.
+
+I will reproduce the sorting rules from the working draft  here to make the following parts easier to follow.
+
+#+BEGIN_EXAMPLE
+Triggers should be sorted in a "most specific first" order. That is:
+
+  1. Atomic triggers first. Sort them so that the triggers with the most amount
+     of words are on top. For multiple triggers with the same amount of words,
+     sort them by length, and then alphabetically if there are still matches
+     in length.
+  2. Sort triggers that contain optionals in their triggers next. Sort them in
+     the same manner as the atomic triggers.
+  3. Sort triggers containing wildcards next. Sort them by the number of words
+     that aren't wildcards. The order of wildcard sorting should be as follows:
+
+     A. Alphabetic wildcards (_)
+     B. Numeric wildcards (#)
+     C. Global wildcards (*)
+
+  4. The very bottom of the list will be a trigger that simply matches * by
+     itself, if it exists. If triggers of only _ or only # exist, sort them in
+     the same order as in step 3.
+
+#+END_EXAMPLE
+
+Since we are going for a single trigger, to me it does not make sense to go through all of the steps, we will stop as soon as we get one that is not empty. We also have to sort based on number of words (which is the reason I stored the triggers as lists of words), and number of characters. So we need some helper functions.
+
+#+BEGIN_SRC lisp :exports code
+  (defun has-conditionals (trigger)
+    "Receives a trigger text property and returns nil if it has no conditionals"
+    (loop
+       for word in (get-prop trigger :text)
+       for result = (find #\[ word :test #'char=)
+       until result finally (return result)))
+
+  (defun has-no-stars (trigger-matches)
+    "Receives a structure of trigger-matches like the one
+  from matching-input, and returns those with empty stars vector"
+    (remove-if-not #'(lambda (stars) (zerop (length stars))) trigger-matches :key #'cdr))
+
+  (defun non-wc-words (trigger-match)
+    "Receives one of the elements of a trigger match list
+  returns the number of words which are not wildcards"
+    (- (length (get-prop (car trigger-match) :text))
+       (length (cdr trigger-match))))
+
+  (defun count-nwc-chars (trigger-match)
+    "Receives a trigger match and returns the number or character
+  which are not wildcards, alternations or optionals"
+    (let ((text (get-prop (car trigger-match) :text)))
+      (reduce #'+
+              (mapcar #'length
+                      (remove-if #'(lambda (s) (scan "[\(\[\*_#]" s)) text)))))
+
+
+#+END_SRC
+
+That is quite a bunch of functions, but I think these are sufficiently small and simple that I don't need to explain them all, however if you are reading this and think you need some explanations just leave some comments, I will gladly setup a hangout to go trough some of these, and some other stuff you may be wondering about. I adopted a naming convention, a trigger-match, is a cons with the trigger on the =car= and the vector of matches (stars) in the =cdr=, this makes it easier to work with higher order functions.
+
+I am going to re-interpret the sorting rules a bit, since the important thing is to select the right trigger in an efficient manner, looking at the rules, the top priority are the atomic triggers with no optionals, then the atomic triggers with optionals, and then everything else, I think the fourth rule will happen naturally when processing the third, so I wrote this function.
+
+#+BEGIN_SRC lisp :exports code
+  (defun top-level-triggers (trigger-matches)
+    "Receives a list of trigger-matches, and returns
+  the ones that correspond to the top level sorting"
+    (let ((atomic (has-no-stars trigger-matches))) ;Get the subset of atomic triggers
+      (or (remove-if #'has-conditionals atomic :key #'car) ;Subset of atomic triggers with no optionals
+          (remove-if-not #'has-conditionals atomic :key #'car) ;Subset of atomic triggers with optionals
+          trigger-matches))) ;If you get to this point just return all
+
+#+END_SRC
+
+This function will return, just one of the three groups described above, since =OR= is short circuited, it only gets to the last expression if all of the others came empty, the following steps are similar in the three subgroups, which is to sort them by number of words which are not wildcards, and my interpretation here is to return all trigger matches that have the maximum number of non wildcard words in the trigger text. That can be achieved with the following functions.
+
+#+BEGIN_SRC lisp :exports code
+  (defun compare-trigger-matches (predicate property)
+    "Compares the text properties of two trigger match elements
+  and returns true if the first is greater than the second"
+    (lambda (tm1 tm2)
+      (funcall predicate
+               (funcall property tm1)
+               (funcall property tm2))))
+
+  (defun top-trigger-matches (predicate property trigger-matches)
+    "Receives a list of trigger matches and keeps only the longest
+  by wordcount"
+    (let* ((sorter (compare-trigger-matches predicate property))
+           (sorted (sort trigger-matches sorter))
+           (max-len (funcall property (first sorted))))
+      (loop for tm in sorted while (= max-len (non-wc-words tm)) collect tm)))
+#+END_SRC
+
+Initially I wrote a function to get the trigger matches with the highest word count, and a different one for the character count, and both needed to define a function to compare the elements, which makes for a lot of code that is inflexible and more difficult to maintain. This code makes things easier, the first function emits a closure which can be used to compare two trigger matches using a predicate like ">" and using a function called property to extract the property that you want to compare (i.e. ~non-wc-words~). The second function uses the first to create a sorter, the list gets sorted with it, and the first element es evaluated for the property, then we collect all of the elements for which property evaluates to the same number. In this case we expect the ~max-len~ to be a number because we are comparing lengths, the function could be made more general by passing a comparator for the while inside the loop, but we don't need that so I will leave it like that.
+
+So getting the trigger matches with the longest non wildcard word count, would look like this
+
+#+BEGIN_SRC lisp :exports both
+  (let ((trigger-matches (matching-input
+                          (on-topic-triggers (get-included-topics (switch-topic "superpowers")))
+                          '("enough" "about" "superman"))))
+    (top-trigger-matches #'> #'non-wc-words trigger-matches))
+
+#+END_SRC
+
+#+RESULTS:
+: ((#<PROTO-GRAPH::NODE ID: 23 |TEXT: (enough about superman) > . #())
+:  (#<PROTO-GRAPH::NODE ID: 31 |TEXT: (enough about superman) > . #()))
+
+There is also a hierarchy related to the wildcards ("_","#" and "*"), outlined on the third rule, I will have to look at the code on other implementations to make sure I do the right thing, because I'm not sure what they mean, since a trigger could be something like "+ _ is # years old", and that contains both a "_" and a "#". Does it count as a "_" or as "#", or maybe both with some algorithm?
+
+This post is already too long for my taste, so I will continue in the next one, but a function not taking in consideration the wildcard comparison rules.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-best-trigger (input &optional (topic *default-topic*))
+    "Get the trigger-match which is the best match for the input"
+    (first 
+     (top-trigger-matches
+      #'> #'count-nwc-chars
+      (top-trigger-matches
+       #'> #'non-wc-words
+       (top-level-triggers
+        (matching-input
+         (on-topic-triggers (get-included-topics topic)) input))))))
+#+END_SRC
+
+This last function is still not in the repository since I am missing the wildcard rule, but is a good enough skeleton.

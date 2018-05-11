@@ -199,7 +199,65 @@ the file has the given extension"
 	(values (string-trim *spaces* match-p)
 		(coerce (loop for i in wc-idxs collect (elt all-results i)) 'vector))))))
 
-;;; end of wilcard processing section
+;; Functions for getting triggers and responses.
+(defun get-included-topics (topic)
+  "Receives a topic and returns a list of it and all included topics"
+  (cons topic (rec-search :from topic :link-type :includes)))
+
+(defun on-topic-triggers (topic-list)
+  "Receives a list of topic nodes and retrieves all triggers related to them"
+  (node-match :label :trigger :nodes (rec-search :to topic-list :link-type :about)))
+
+(defun matching-input (trigger-list input)
+  "Recursive function to form a list of matched triggers and captured text"
+  (when (car trigger-list)
+    (multiple-value-bind (matched captured)
+	(match-with-pattern (get-prop (car trigger-list) :text) input)
+      (if matched (cons (cons (car trigger-list) captured)
+			(matching-input (cdr trigger-list) input))
+	  (matching-input (cdr trigger-list) input)))))
+
+(defun has-conditionals (trigger)
+  "Receives a trigger text property and returns nil if it has no conditionals"
+  (loop
+     for word in (get-prop trigger :text)
+     for result = (find #\[ word :test #'char=)
+     until result finally (return result)))
+
+(defun has-no-stars (trigger-matches)
+  "Receives a structure of trigger-matches like the one
+from matching-input, and returns those with empty stars vector"
+  (remove-if-not #'(lambda (stars) (zerop (length stars))) trigger-matches :key #'cdr))
+
+(defun non-wc-words (trigger-match)
+  "Receives one of the elements of a trigger match list
+returns the number of words which are not wildcards"
+  (- (length (get-prop (car trigger-match) :text))
+     (length (cdr trigger-match))))
+
+(defun count-nwc-chars (trigger-match)
+  "Receives a trigger match and returns the number or character
+which are not wildcards, alternations or optionals"
+  (let ((text (get-prop (car trigger-match) :text)))
+    (reduce #'+
+	    (mapcar #'length
+		    (remove-if #'(lambda (s) (scan "[\(\[\*_#]" s)) text)))))
+
+(defun compare-trigger-matches (predicate property)
+  "Compares the text properties of two trigger match elements
+and returns true if the first is greater than the second"
+  (lambda (tm1 tm2)
+    (funcall predicate
+	     (funcall property tm1)
+	     (funcall property tm2))))
+
+(defun top-trigger-matches (predicate property trigger-matches)
+  "Receives a list of trigger matches and keeps only the longest
+by wordcount"
+  (let* ((sorter (compare-trigger-matches predicate property))
+	 (sorted (sort trigger-matches sorter))
+         (max-len (funcall property (first sorted))))
+    (loop for tm in sorted while (= max-len (non-wc-words tm)) collect tm)))
 
 ;; Evaluator
 (defun do-command (line)
