@@ -21,6 +21,9 @@
 (defvar *exit-label* nil
   "Meant to contain a closure that maintains the open label environment")
 
+(defvar *stars* nil
+  "Array containing all of the captured wildcard text")
+
 ;;; Utility functions
 (defun exit-label ()
   "Function to more clearly execute the exit-label closure"
@@ -132,6 +135,16 @@ the file has the given extension"
   "getter for the rivescript variables"
   (gethash name (gethash type *rs-vars*)))
 
+(defun split-lists (ids list)
+  "Receives a list of ids and a list to be separated,
+creates a list for each id, with the elements that follow it"
+  (let ((lists (make-sequence 'list (length ids))))
+    (loop
+       for e in list
+       for b = (position e ids :test #'string=)
+       for i = (or b i) unless (or b (not i)) do (push e (nth i lists)))
+    (mapcar #'nreverse lists)))
+
 ;;; RS Varaiable utilities
 (defun set-rs-var (type name value)
   "Setter for the rivescript variables"
@@ -232,16 +245,30 @@ from matching-input, and returns those with empty stars vector"
 (defun non-wc-words (trigger-match)
   "Receives one of the elements of a trigger match list
 returns the number of words which are not wildcards"
-  (- (length (get-prop (car trigger-match) :text))
-     (length (cdr trigger-match))))
+  (when (car trigger-match)
+    (- (length (get-prop (car trigger-match) :text))
+       (length (cdr trigger-match)))))
 
 (defun count-nwc-chars (trigger-match)
   "Receives a trigger match and returns the number or character
 which are not wildcards, alternations or optionals"
+  (when (car trigger-match)
+    (let ((text (get-prop (car trigger-match) :text)))
+      (reduce #'+
+	      (mapcar #'length
+		      (remove-if #'(lambda (s) (scan "[\\(\\[\\*_#]" s)) text))))))
+
+(defun trigger-has (char trigger-match)
+  "Checks for a particular character to see if it is present"
   (let ((text (get-prop (car trigger-match) :text)))
-    (reduce #'+
-	    (mapcar #'length
-		    (remove-if #'(lambda (s) (scan "[\(\[\*_#]" s)) text)))))
+    (loop for token in text for r = (find char token :test #'char=) finally (return r))))
+
+(defun >-wildcard (trigger-match1 trigger-match2)
+  "Applies _ > # > * ordering"
+  (or (and (trigger-has #\_ trigger-match1)
+	   (not (trigger-has #\_ trigger-match2)))
+      (and (trigger-has #\# trigger-match1)
+	   (not (trigger-has #\# trigger-match2)))))
 
 (defun compare-trigger-matches (predicate property)
   "Compares the text properties of two trigger match elements
@@ -257,7 +284,10 @@ by wordcount"
   (let* ((sorter (compare-trigger-matches predicate property))
 	 (sorted (sort trigger-matches sorter))
          (max-len (funcall property (first sorted))))
-    (loop for tm in sorted while (= max-len (non-wc-words tm)) collect tm)))
+    (loop for tm in sorted while (= max-len (funcall property tm)) collect tm)))
+
+(defmacro piping (&body body)
+  (reduce #'(lambda (x y) (reverse (list x y))) `(,@body)))
 
 ;; Evaluator
 (defun do-command (line)

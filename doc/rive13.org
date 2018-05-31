@@ -1,0 +1,292 @@
+#+AUTHOR: Mauricio Fernández.
+#+OPTIONS: num:nil
+#+OPTIONS: toc:nil
+#+OPTIONS: email:nil
+#+TITLE: Creating a CL-RiveScript Interpreter (Part 13)
+
+* Using the new matching function
+
+Last time, I got stuck on a couple of wrinkles and decided that the post was too long. Asides from that, I lacked some information, since I want to publish often I decided to leave it at some "comfortable" point. The plan that was outlined on the las post is coming along nicely, but I did not get as far as I would have liked.
+ 
+** Current state of the plan
+
+1. +Write a function that receives a list of topics and returns a list of triggers belonging to those topics.+
+2. +Write a function that gets a list of triggers, and returns a list of matching triggers, using ~match-with-pattern~.+
+3. Write a function that sorts the matched triggers according to the rules in the RiveScript working draft.
+4. Fix the "inherits/includes" situation.
+5. Write code to replace =<starN>= tags in the responses according to any captured text. 
+6. Put it all together.
+
+** Completing the Sorting function (step 3)
+
+Last time I had completed most of the rules and even wrote a placeholder function. Because of the way I am writing the interpreter what I have been writing are not really sorting functions but "choose the top" functions, this is because I don't do any previous sorting like is done in other implementations, I think Lisp is efficient enough that presorting is unnecessary (I might be wrong), so far with a very small brain everything seems to work fine, we will see if that continues to be the case later.
+
+Anyway, there was a rule that I did not know how to apply, I looked at the [[https://github.com/aichaos/rivescript-go/blob/master/sorting.go][go code]] I don't program in go, but I think I get how it works by looking at the code. I looked at Go because it was recommended by the RiveScript site as one of the implementations to look at. I made a quick check of the sorting.go file and decided on a way to sort based on wildcards. The rule is "_" before "#" and "*" as the last one, so a string that contains at least one "_" will be placed before one that contains only "#" or "*", and one that contains "#" but no "_" will be placed before one that only contains "*".
+
+This is how we are going to express this in code.
+
+#+BEGIN_SRC lisp :exports code
+  (defun trigger-has (char trigger-match)
+    "Checks for a particular character to see if it is present"
+    (let ((text (get-prop (car trigger-match) :text)))
+      (loop for token in text for r = (find char token :test #'char=) finally (return r))))
+
+  (defun >-wildcard (trigger-match1 trigger-match2)
+    "Applies _ > # > * ordering"
+    (unless (and (zerop (length (cdr trigger-match1)))
+                 (zerop (length (cdr trigger-match2))))
+      (or (and (trigger-has #\_ trigger-match1)
+               (not (trigger-has #\_ trigger-match2)))
+          (and (trigger-has #\# trigger-match1)
+               (not (trigger-has #\# trigger-match2))))))
+
+#+END_SRC
+
+The ~trigger-has~ function only checks if the character provided is anywhere in any of the tokens (words) of the trigger, we use this function to write the function that comes next (~>-wildcard~), it first checks the rules we talked about, if the first trigger-match contains a "_", and the second one doesn't then the first is considered greater than the second, if not then it does the same for "#". You can see that initially we check that the capture lists are not empty, that would mean that the triggers contained no wildcards.
+
+Before we continue, I made a mistake when I wrote the ~top-trigger-matches~ function in my last post, I tested it first with ~non-wc-words~ as the =property=, and I left it hard coded in on part of the function, the corrected function looks like this.
+
+#+BEGIN_SRC lisp :exports code
+  (defun top-trigger-matches (predicate property trigger-matches)
+    "Receives a list of trigger matches and keeps only the longest
+  by wordcount"
+    (let* ((sorter (compare-trigger-matches predicate property))
+           (sorted (sort trigger-matches sorter))
+           (max-len (funcall property (first sorted))))
+      (loop for tm in sorted while (= max-len (funcall property tm)) collect tm)))
+
+#+END_SRC
+
+With that we can write the ~get-best-trigger~ function, which follows all of the rules.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-best-trigger (input &optional (topic *default-topic*))
+    "Get the trigger-match which is the best match for the input"
+    (let ((matches
+           (top-trigger-matches
+            #'> #'count-nwc-chars
+            (top-trigger-matches
+             #'> #'non-wc-words
+             (top-level-triggers
+              (matching-input
+               (on-topic-triggers (get-included-topics topic)) input))))))
+      (first (sort matches #'>-wildcard))))
+
+#+END_SRC
+
+This function definition is a bit difficult to read, I will make this definition longer to help readability, to do this I will define a macro, I call it ~piping~, all it does is to evaluate the first function, and then the second using the output of the first one as input, and then the third, ans so on, to do that and to keep the macro simple, all functions in the list should receive a single argument. 
+
+Here are both the macro definition and the new function written with it.
+
+#+BEGIN_SRC lisp :exports code
+  (defmacro piping (&body body)
+    (reduce #'(lambda (x y) (reverse (list x y))) `(,@body)))
+
+  (defun get-best-trigger (input &optional (topic *default-topic*))
+    "Get the trigger-match which is the best match for the input"
+    (labels ((top-wordcount (tms)
+               (top-trigger-matches #'> #'non-wc-words tms))
+             (top-charcount (tms)
+               (top-trigger-matches #'> #'count-nwc-chars tms))
+             (wc-sort (tms)
+               (sort tms #'>-wildcard)))
+      (let ((on-topic (on-topic-triggers (get-included-topics topic))))
+        (piping
+          (matching-input on-topic input)
+          top-level-triggers
+          top-wordcount
+          top-charcount
+          wc-sort
+          first))))
+
+#+END_SRC
+
+In the function we first define some appropriately named functions, ~top-wordcount~, ~top-charcount~ and ~wc-sort~ (wildcard sort), the =tms= argument in the functions stands for trigger matches, so each function receives a list of trigger matches and returns another list of trigger matches. Asides from that we define a variable =on-topic= which contains all of the triggers which relate to the current and included topics. 
+
+Then there is piping, which feels like is reverted, because we are used to nest functions, but in this case is more like unix piping. To me, this is more readable, and I was able to stack the ~wc-sort~ and ~first~ functions more naturally in this version, granted that it could be done without ~piping~, by nesting instead of listing.
+
+*Note:* When testing this function with something that does not match anything I found that ~non-wc-words~ and ~count-nwc-chars~ were not handling cases where there were not matches correctly, so I did added a check for that, the changes are simple, so I won't reproduce them.
+
+** Fixing the includes/inherits situation
+
+When I originally implemented inheritance I confused inclusion with inheritance, the function we just defined looks for all triggers that are included, and it works, and the ~get-answers~ function does inheritance correctly but still is stuck in pre-wildcard times, by combining this two things and fixing the code that defines the links to inherited and included topics we can have a complete and correct solution.
+
+Lets start by fixing the ~topic~ function, this function gets called when the word immediately after ">" is topic, and the argument is the list of all words that follow the "topic" keyword. The current function is broken in several ways, for example it only takes one "includes" argument that must immediately follow the topic name, and the rest of the arguments are assumed to be inherited topics even though they follow an "includes" keyword.
+
+The working draft states that.
+
+#+BEGIN_QUOTE
+"You can use as many "includes" and "inherits" keywords as you want, but the order you specify them has no effect."
+#+END_QUOTE
+
+This means that we have to make our function more robust. We need two lists, one for "includes" and one for "inherits".
+We will start by writing a function to split the lists based on keywords.
+
+#+BEGIN_SRC lisp :exports code
+  (defun split-lists (ids list)
+    "Receives a list of ids and a list to be separated,
+  creates a list for each id, with the elements that follow it"
+    (let ((lists (make-sequence 'list (length ids))))
+      (loop
+         for e in list
+         for b = (position e ids :test #'string=)
+         for i = (or b i) unless (or b (not i)) do (push e (nth i lists)))
+      (mapcar #'nreverse lists)))
+
+#+END_SRC
+
+The =ids= argument is a list of strings that will serve as separators for the list passed in the =list= argument, the function goes trough every element in the list, if it is in the list of ids the variable =i= is assigned the position of the string in the =ids= list, otherwise it retains its current value, if the element is not an id it is pushed in the list in the position of the last id matched, finally all the lists get reversed to reflect the original order, and that is the output of the function. Here is an example.
+
+#+BEGIN_SRC lisp :exports both
+  (split-lists '("includes" "inherits") '("includes" "Reed" "Sue" "Johny" "Ben" "inherits" "Marvel" "Comics" "includes" "Pym"))
+#+END_SRC
+
+#+RESULTS:
+| Reed   | Sue    | Johny | Ben | Pym |
+| Marvel | Comics |       |     |     |
+
+Notice that if the list doesn't start with an id, =i= will be =nil= and the =nth= function would fail, the ~(not i)~ is there to prevent that. I included two "includes" in the list to verify the behavior. With this in place we can use a ~destructuring-bind~ to assign the variables.
+
+When  we defined labels, the convention was to read whatever follows the ">" as a the function name to be called with the rest of the line being the arguments as list of strings, the function to define a topic was ~topic~, this is the new definition.
+
+#+BEGIN_SRC lisp :exports code
+  (defun topic (&rest args)
+    "Define the contents of a conversation topic"
+    (when args
+      (let ((topic (switch-topic (car args) :create t))
+            (related (cdr args)))
+        (destructuring-bind (includes inherits) (if related
+                                                   (split-lists '("includes" "inherits") related)
+                                                   '(nil nil))
+          (with-input-from-string (s (get-captured-text))
+            (loop for line = (read-line s nil 'eof)
+               until (eq line 'eof)
+               do (process-line line))
+            (loop for included-topic in includes
+               do (link-create :includes topic (switch-topic included-topic :create t)))
+            (loop for i from 1 for inherited-topic in inherits
+               do (link-create :inherits topic (switch-topic inherited-topic :create t) :properties `(:order ,i)))))))
+    (setf *current-topic* *default-topic*))
+
+#+END_SRC
+
+This basically creates topic links without any particular properties for the inclusions, and links them using an appropriate link type, and then it does the same but for the inherited topics, in this case storing an =:order= property to be used to go through the inherited topics in order.
+
+The only thing that we still need to do about the inheritance/inclusion situation is fixing ~get-answers~, but there is where we will put everything together, so we will leave it for later right now we have to do one more thing.
+
+** Replacing <starN> tags in the answers
+
+According to the [[https://www.rivescript.com/docs/tutorial#tags][RiveScript tutorial]] the =<starN>= tags will be replaced by the corresponding matches from the trigger wildcards, the first wildcard will match =<star1>= and is conveniently aliased to =<star>= and the rest will be =<star2>=, =<star3>=, and so forth. Because of the way we structured our trigger matches the array of matched strings is stored in the ~cdr~ of the matched trigger. When we retrieve the answer we can go on and use the array to do the replacements, of course since arrays are zero indexed we have to decrement N by one to get the index, and in case there is no N we have to assume N=0. We can recursively use regular expressions to do the replacements, lets try it.
+
+#+BEGIN_SRC lisp :exports code
+  (defun replace-stars (string star-array)
+    "Replace the <starN> tags"
+    (multiple-value-bind (match number)(scan-to-strings "<star(\\d)*>" string)
+      (if match
+        (let ((index (if (elt number 0)
+                         (1- (parse-integer (elt number 0) :junk-allowed nil))
+                         0)))
+          (replace-stars (regex-replace-all match string (elt star-array index)) star-array))
+        string)))
+#+END_SRC
+
+This works OK, we are likely going to change this in the future because there are other similar tags that have a similar behavior, like =<botstarN>=, but we will cross that bridge when we get to it.
+
+** Putting it all together.
+
+Before we do anything else we will want our test brain to have things that test all of the things we implemented and/or fixed, so wee need a topic with inclusions, a topic with inheritance, a topic with both, wilcards and =starN= tags in the replies. I introduced some modifications in the =example.rive= file, mainly I changed "superpowers" to inherit from "superman" instead of including it, added a "superfriend" topic, which is included in the superman topic, and I permanently added the triggers and responses that were temporarily added in the last post. I won't include the changes in the post but you can check them in the repository.
+
+With that out of the way we can now modify ~get-answers~, ~get-best-trigger~ takes care of topic inclussion, and the code in ~get-answers~ takes care of inheritance. Since we want the function to be a direct replacement the output should be the same as in the previous version, but the output does not perform any replacement of =<starN>= tags, and since we are returning nodes and not text, this is not the place to do it. For that reason we are using a special variable =*stars*= to store the array with the replacement options, this list is stored when there is a best trigger, and since the function is recursive it does not matter how deep in the inheritance structure the best-trigger is found.
+
+#+BEGIN_SRC lisp :exports code
+  (defun get-answers (input &optional (topic *user-topic*) (depth 1) hist)
+    "Get set of appropriate replies based on the input"
+    (let* ((nodes-about (rec-search :to (get-included-topics topic) :link-type :about))
+           (best-trigger (get-best-trigger input topic))
+           (response-links  (link-search :from nodes-about :link-type :responds))
+           (topic-text (get-prop topic :text))
+           (topics (link-search :from topic :link-type :inherits)))
+      (if best-trigger
+          (progn
+            (setf *stars* (cdr best-trigger))
+            (mapcar #'(lambda (link) (cons (from-node link)
+                                           (get-prop link :weight)))
+                    (link-search :to (car best-trigger) :link-type :responds
+                                 :link-list response-links)))
+          (if (or (member topic-text hist) (> (1+ depth) *depth*))
+              nil
+              (when topics
+                (loop
+                   for i from 1 upto (length topics)
+                   for responses = (get-answers input
+                                                (included-topic i topics)
+                                                (1+ depth) (cons topic-text hist))
+                   when responses
+                   return responses))))))
+#+END_SRC
+
+So finally, we can call ~replace-stars~ in the main function, and that would be the final step.
+
+#+BEGIN_SRC lisp :exports code
+  (defun main (directory)
+    "Receives a brain directory and processes all .rive files"
+    (read-line)
+    (read-brain directory)
+    (loop for input = (progn
+                        (format t "~&> ")
+                        (force-output)
+                        (get-input))
+       until (string= "bye" (car input))
+       do (format t "~a~%" (replace-stars
+                            (select-response (or (get-answers input)
+                                                 (list (cons *default-answer* 1))))
+                            ,*stars*))))
+
+#+END_SRC
+
+Now, all we have to do is have a little conversation with our bot, to see if everything is working
+
+#+BEGIN_EXAMPLE
+  (:CL-RIVESCRIPT)                                  
+  CL-RIVESCRIPT> (in-package :cl-rivescript)                     
+                                                    
+  #<PACKAGE "CL-RIVESCRIPT">                        
+  CL-RIVESCRIPT> (main "./testbrain")                            
+                                                    
+  > Hello, Bot!                                     
+  Hello, human!                                     
+  > How are you?                                    
+  I'm fine, thanks for asking!                      
+  > Who is Aquaman?                                 
+  I suppose aquaman is someone                      
+  > What is a batmobil?                             
+  I don't know what a batmobil is                   
+  > Who is Superman?                                
+  He is an acquaintance of the superhero Batman     
+  > I want to talk about Superman                   
+  That is a topic I know little about               
+  > What is his weakness?                           
+  I don't know if I should tell you                 
+  > Is he a team player?                            
+  I don't know you should ask the other superfriends
+  > Does he belong to the justice league?           
+  Yes he does                                       
+  > Do you know his superpowers?                    
+  Ask me, I'll see if I can tell you                
+  > Is he fast?                                     
+  He's challenged even the flash                    
+  > enough about Superman                           
+  I agree, let's move to another subject            
+  > Who is the Joker?                               
+  He is a clown, the scariest of them all           
+  > How is Batman?                                  
+  I'm sorry, I don't understand                     
+  > bye                                             
+                                                    
+  NIL                                               
+  CL-RIVESCRIPT>                                                 
+#+END_EXAMPLE
+
+I am pretty satisfied with this conversation, I had some others to test different aspects, everything seems to be working fine. I left this post a bit long because I wanted to finish on a conversation with the bot, to avoid more cliffhangers. I can cross the other things from the plan from the previous post now, and continue with other aspects of the interpreter.
+
+#  LocalWords:  RiveScript wildcards wildcard

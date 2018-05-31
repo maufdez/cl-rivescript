@@ -60,15 +60,18 @@
   "Define the contents of a conversation topic"
   (when args
     (let ((topic (switch-topic (car args) :create t))
-	  (includes (if (string= (cadr args) "includes")
-			(cddr args)
-			nil)))
-      (with-input-from-string (s (get-captured-text))
-	(loop for line = (read-line s nil 'eof)
-	   until (eq line 'eof)
-	   do (process-line line))
-	(loop for i from 1 for inc-topic in includes
-	   do (link-create :includes topic (switch-topic inc-topic :create t) :properties `(:order ,i))))))
+	  (related (cdr args)))
+      (destructuring-bind (includes inherits) (if related
+						 (split-lists '("includes" "inherits") related)
+						 '(nil nil))
+	(with-input-from-string (s (get-captured-text))
+	  (loop for line = (read-line s nil 'eof)
+	     until (eq line 'eof)
+	     do (process-line line))
+	  (loop for included-topic in includes
+	     do (link-create :includes topic (switch-topic included-topic :create t)))
+	  (loop for i from 1 for inherited-topic in inherits
+	     do (link-create :inherits topic (switch-topic inherited-topic :create t) :properties `(:order ,i)))))))
   (setf *current-topic* *default-topic*))
 
 ;;; Helper functions for the command definitions
@@ -189,28 +192,38 @@ the ones that correspond to the top level sorting"
 	(remove-if-not #'has-conditionals atomic :key #'car) ;Subset of atomic triggers with optionals
 	trigger-matches))) ;If you get to this point just return all
 
-(defun longest-wordcount (trigger-matches)
-  "Receives a list of trigger matches and keeps only the longest
-by wordcount"
-  (let* ((sorted (sort trigger-matches #'trigger-text-wordcont>))
-	 (max-len (non-wc-words (first sorted))))
-    (loop for tm in sorted while (= max-len (non-wc-words tm)) collect tm)))
+(defun get-best-trigger (input &optional (topic *default-topic*))
+  "Get the trigger-match which is the best match for the input"
+  (labels ((top-wordcount (tms)
+	     (top-trigger-matches #'> #'non-wc-words tms))
+	   (top-charcount (tms)
+	     (top-trigger-matches #'> #'count-nwc-chars tms))
+	   (wc-sort (tms)
+	     (sort tms #'>-wildcard)))
+    (let ((on-topic (on-topic-triggers (get-included-topics topic))))
+      (piping
+	(matching-input on-topic input)
+	top-level-triggers
+	top-wordcount
+	top-charcount
+	wc-sort
+	first))))
 
 (defun get-answers (input &optional (topic *user-topic*) (depth 1) hist)
-  "Gets a list of words forming a phrase to see if it matches any trigger"
-  (let* ((nodes-about (rec-search :to topic :link-type :about))
-         (triggers (node-match :label :trigger
-                               :properties `(:text ,input)
-                               :nodes nodes-about))
-         (response-links  (link-search :from nodes-about :link-type :responds))
+  "Get set of appropriate replies based on the input"
+  (let* ((nodes-about (rec-search :to (get-included-topics topic) :link-type :about))
+	 (best-trigger (get-best-trigger input topic))
+	 (response-links  (link-search :from nodes-about :link-type :responds))
 	 (topic-text (get-prop topic :text))
-	 (topics (link-search :from topic :link-type :includes)))
-    (if triggers
-        (mapcar #'(lambda (link) (cons (from-node link)
-                                       (get-prop link :weight)))
-                (link-search :to triggers :link-type :responds
-                             :link-list response-links))
-        (if (or (member topic-text hist) (> (1+ depth) *depth*))
+	 (topics (link-search :from topic :link-type :inherits)))
+    (if best-trigger
+	(progn
+	  (setf *stars* (cdr best-trigger))
+	  (mapcar #'(lambda (link) (cons (from-node link)
+					 (get-prop link :weight)))
+		  (link-search :to (car best-trigger) :link-type :responds
+			       :link-list response-links)))
+	(if (or (member topic-text hist) (> (1+ depth) *depth*))
 	    nil
 	    (when topics
 	      (loop
@@ -244,6 +257,8 @@ by wordcount"
 		      (force-output)
 		      (get-input))
      until (string= "bye" (car input))
-     do (format t "~a~%" (select-response (or (get-answers input)
-					      (list (cons *default-answer* 1)))))))
+     do (format t "~a~%" (replace-stars
+			  (select-response (or (get-answers input)
+					       (list (cons *default-answer* 1))))
+			  *stars*))))
 

@@ -42,3 +42,15 @@
     `(let ((vars ',vars),@defaults)
        (declare (special ,@vars))
        ,@body)))
+
+;;; Replace star tags
+
+(defun replace-stars (string star-array)
+  "Replace the <starN> tags"
+  (multiple-value-bind (match number)(scan-to-strings "<star(\\d)*>" string)
+    (if match
+      (let ((index (if (elt number 0)
+		       (1- (parse-integer (elt number 0) :junk-allowed nil))
+		       0)))
+	(replace-stars (regex-replace-all match string (elt star-array index)) star-array))
+      string)))
